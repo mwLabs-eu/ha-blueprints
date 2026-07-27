@@ -1,10 +1,12 @@
+# blueprints/automation/bewaesserung_garten_temperaturabhaengig.yaml
+
 blueprint:
   name: "Bewässerung Garten – Temperaturabhängig mit Sunrise-Timing & Rain-Skip"
   description: >
     Steuert ein Zigbee2MQTT-Ventil (z.B. Sonoff SWV) basierend auf Wettervorhersage.
-    Berechnet den Startzeitpunkt relativ zum Sonnenaufgang und wählt die Laufzeit
-    anhand von drei Temperaturstufen (kalt/mittel/heiss). Überspringt die Bewässerung
-    bei ausreichend Niederschlag (Forecast) oder aktuellem Regen.
+    Berechnet Startzeitpunkt UND Laufzeit relativ zum Sonnenaufgang abhängig von
+    drei Temperaturstufen (kalt/mittel/heiss). Überspringt die Bewässerung bei
+    ausreichend Niederschlag (Forecast) oder aktuellem Regen.
   domain: automation
   source_url: https://github.com/dein-repo/ha-blueprints/bewaesserung_garten.yaml
 
@@ -27,15 +29,36 @@ blueprint:
 
     notify_service:
       name: Notify-Ziel (optional)
-      description: Notify-Service für Deadman-Switch-Warnung. Leer lassen zum Deaktivieren.
+      description: Notify-Service-Name ohne "notify."-Präfix für Deadman-Switch-Warnung. Leer lassen zum Deaktivieren.
       default: ""
       selector:
         text:
 
-    vorlauf_minuten:
-      name: Vorlauf vor Sonnenaufgang
-      description: Minuten, die vor dem berechneten Sonnenaufgang gestartet wird.
-      default: 45
+    vorlauf_kalt:
+      name: Vorlauf vor Sonnenaufgang – kalt
+      description: Minuten vor Sonnenaufgang, an kalten Tagen.
+      default: 20
+      selector:
+        number:
+          min: 0
+          max: 180
+          step: 5
+          unit_of_measurement: min
+
+    vorlauf_mittel:
+      name: Vorlauf vor Sonnenaufgang – mittel
+      default: 35
+      selector:
+        number:
+          min: 0
+          max: 180
+          step: 5
+          unit_of_measurement: min
+
+    vorlauf_heiss:
+      name: Vorlauf vor Sonnenaufgang – heiss
+      description: Größerer Vorlauf, damit die Bewässerung vor der Hitze abgeschlossen ist.
+      default: 60
       selector:
         number:
           min: 0
@@ -133,7 +156,11 @@ blueprint:
 variables:
   valve_entity: !input valve_entity
   weather_entity: !input weather_entity
-  vorlauf_minuten: !input vorlauf_minuten
+  notify_service: !input notify_service
+  deadman_timeout: !input deadman_timeout
+  vorlauf_kalt: !input vorlauf_kalt
+  vorlauf_mittel: !input vorlauf_mittel
+  vorlauf_heiss: !input vorlauf_heiss
   dauer_kalt: !input dauer_kalt
   dauer_mittel: !input dauer_mittel
   dauer_heiss: !input dauer_heiss
@@ -142,6 +169,15 @@ variables:
   regen_schwelle_forecast: !input regen_schwelle_forecast
   aktueller_regen_skip: !input aktueller_regen_skip
   master_schalter: !input master_schalter
+  temp_max_heute: >
+    {% set fc = state_attr(weather_entity, 'forecast') %}
+    {{ fc[0].temperature | float(15) if fc and fc | length > 0 else 15 }}
+  vorlauf_minuten: >
+    {{ vorlauf_kalt if temp_max_heute < schwelle_kalt|float
+       else (vorlauf_heiss if temp_max_heute >= schwelle_heiss|float else vorlauf_mittel) }}
+  berechnete_dauer: >
+    {{ dauer_kalt if temp_max_heute < schwelle_kalt|float
+       else (dauer_heiss if temp_max_heute >= schwelle_heiss|float else dauer_mittel) }}
 
 triggers:
   - trigger: time_pattern
@@ -159,9 +195,9 @@ conditions:
 
   # Ventil aktuell geschlossen
   - condition: template
-    value_template: "{{ is_state(valve_entity, 'off') }}"
+    value_template: "{{ is_state(valve_entity, 'off') or is_state(valve_entity, 'closed') }}"
 
-  # Fenster: berechneter Startzeitpunkt erreicht (5-Minuten-Toleranzfenster)
+  # Fenster: berechneter Startzeitpunkt erreicht (10-Minuten-Toleranzfenster)
   - condition: template
     value_template: >
       {% set sunrise = state_attr('sun.sun', 'next_rising') %}
@@ -193,21 +229,9 @@ conditions:
 
   # Laufzeit muss > 0 sein
   - condition: template
-    value_template: >
-      {% set fc = state_attr(weather_entity, 'forecast') %}
-      {% set temp_max = fc[0].temperature | float(15) if fc and fc | length > 0 else 15 %}
-      {% set dauer = dauer_kalt if temp_max < schwelle_kalt|float
-                      else (dauer_heiss if temp_max >= schwelle_heiss|float else dauer_mittel) %}
-      {{ dauer | float > 0 }}
+    value_template: "{{ berechnete_dauer | float > 0 }}"
 
 actions:
-  - variables:
-      berechnete_dauer: >
-        {% set fc = state_attr(weather_entity, 'forecast') %}
-        {% set temp_max = fc[0].temperature | float(15) if fc and fc | length > 0 else 15 %}
-        {{ dauer_kalt if temp_max < schwelle_kalt|float
-           else (dauer_heiss if temp_max >= schwelle_heiss|float else dauer_mittel) }}
-
   - action: >
       {{ 'switch.turn_on' if valve_entity.split('.')[0] == 'switch' else 'valve.open_valve' }}
     target:
@@ -250,16 +274,14 @@ actions:
                   entity_id: "{{ valve_entity }}"
               - if:
                   - condition: template
-                    value_template: "{{ (notify_service | default('')) | length > 0 }}"
-                variables:
-                  notify_service: !input notify_service
+                    value_template: "{{ notify_service | length > 0 }}"
                 then:
                   - action: "notify.{{ notify_service }}"
                     data:
                       title: "⚠️ Bewässerung Garten"
                       message: >
                         Ventil {{ valve_entity }} war länger als
-                        {{ (!input deadman_timeout) }} Minuten aktiv.
+                        {{ deadman_timeout }} Minuten aktiv.
                         Zwangsschließung ausgeführt. Manuelle Prüfung erforderlich.
 
 mode: single
