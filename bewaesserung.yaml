@@ -4,9 +4,10 @@ blueprint:
   name: "Bewässerung Garten – Temperaturabhängig mit Sunrise-Timing & Rain-Skip"
   description: >
     Steuert ein Zigbee2MQTT-Ventil (z.B. Sonoff SWV) basierend auf Wettervorhersage.
-    Berechnet Startzeitpunkt UND Laufzeit relativ zum Sonnenaufgang abhängig von
-    drei Temperaturstufen (kalt/mittel/heiss). Überspringt die Bewässerung bei
-    ausreichend Niederschlag (Forecast) oder aktuellem Regen.
+    Der Vorlauf vor Sonnenaufgang entspricht exakt der berechneten Gießdauer
+    (z.B. 20 Minuten Laufzeit → Start 20 Minuten vor Sonnenaufgang, Ende bei Sonnenaufgang).
+    Laufzeit richtet sich nach drei Temperaturstufen (kalt/mittel/heiss).
+    Überspringt die Bewässerung bei ausreichend Niederschlag (Forecast) oder aktuellem Regen.
   domain: automation
   source_url: https://github.com/dein-repo/ha-blueprints/bewaesserung_garten.yaml
 
@@ -34,40 +35,9 @@ blueprint:
       selector:
         text:
 
-    vorlauf_kalt:
-      name: Vorlauf vor Sonnenaufgang – kalt
-      description: Minuten vor Sonnenaufgang, an kalten Tagen.
-      default: 20
-      selector:
-        number:
-          min: 0
-          max: 180
-          step: 5
-          unit_of_measurement: min
-
-    vorlauf_mittel:
-      name: Vorlauf vor Sonnenaufgang – mittel
-      default: 35
-      selector:
-        number:
-          min: 0
-          max: 180
-          step: 5
-          unit_of_measurement: min
-
-    vorlauf_heiss:
-      name: Vorlauf vor Sonnenaufgang – heiss
-      description: Größerer Vorlauf, damit die Bewässerung vor der Hitze abgeschlossen ist.
-      default: 60
-      selector:
-        number:
-          min: 0
-          max: 180
-          step: 5
-          unit_of_measurement: min
-
     dauer_kalt:
       name: Laufzeit kalt
+      description: Gießdauer an kalten Tagen. Entspricht gleichzeitig dem Vorlauf vor Sonnenaufgang.
       default: 5
       selector:
         number:
@@ -158,9 +128,6 @@ variables:
   weather_entity: !input weather_entity
   notify_service: !input notify_service
   deadman_timeout: !input deadman_timeout
-  vorlauf_kalt: !input vorlauf_kalt
-  vorlauf_mittel: !input vorlauf_mittel
-  vorlauf_heiss: !input vorlauf_heiss
   dauer_kalt: !input dauer_kalt
   dauer_mittel: !input dauer_mittel
   dauer_heiss: !input dauer_heiss
@@ -172,9 +139,6 @@ variables:
   temp_max_heute: >
     {% set fc = state_attr(weather_entity, 'forecast') %}
     {{ fc[0].temperature | float(15) if fc and fc | length > 0 else 15 }}
-  vorlauf_minuten: >
-    {{ vorlauf_kalt if temp_max_heute < schwelle_kalt|float
-       else (vorlauf_heiss if temp_max_heute >= schwelle_heiss|float else vorlauf_mittel) }}
   berechnete_dauer: >
     {{ dauer_kalt if temp_max_heute < schwelle_kalt|float
        else (dauer_heiss if temp_max_heute >= schwelle_heiss|float else dauer_mittel) }}
@@ -198,13 +162,14 @@ conditions:
     value_template: "{{ is_state(valve_entity, 'off') or is_state(valve_entity, 'closed') }}"
 
   # Fenster: berechneter Startzeitpunkt erreicht (10-Minuten-Toleranzfenster)
+  # Startzeitpunkt = Sonnenaufgang - berechnete_dauer (Ende der Bewässerung fällt exakt auf Sonnenaufgang)
   - condition: template
     value_template: >
       {% set sunrise = state_attr('sun.sun', 'next_rising') %}
       {% if sunrise is none %}
         false
       {% else %}
-        {% set start = as_datetime(sunrise) - timedelta(minutes=vorlauf_minuten|float) %}
+        {% set start = as_datetime(sunrise) - timedelta(minutes=berechnete_dauer|float) %}
         {{ now() >= start and now() < (start + timedelta(minutes=10)) }}
       {% endif %}
 
