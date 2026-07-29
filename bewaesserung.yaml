@@ -136,9 +136,36 @@ variables:
   regen_schwelle_forecast: !input regen_schwelle_forecast
   aktueller_regen_skip: !input aktueller_regen_skip
   master_schalter: !input master_schalter
+
+  # Forecast-Array des heutigen Tages filtern (Datumsvergleich statt Index-Annahme)
+  heutiges_forecast:
+    "{{ state_attr(weather_entity, 'forecast')
+        | default([], true)
+        | selectattr('datetime', 'defined')
+        | selectattr('datetime', 'match', '^' + now().strftime('%Y-%m-%d')) 
+        | list }}"
+
+  # Tagesmaximum aus allen heutigen Einträgen (deckt sowohl daily- als auch hourly-Forecasts ab)
   temp_max_heute: >
-    {% set fc = state_attr(weather_entity, 'forecast') %}
-    {{ fc[0].temperature | float(15) if fc and fc | length > 0 else 15 }}
+    {% set eintraege = heutiges_forecast %}
+    {% if eintraege | length > 0 %}
+      {{ eintraege | map(attribute='temperature') | select('number') | list | max }}
+    {% else %}
+      {# Fallback: erster Forecast-Eintrag, falls Datumsfilter nichts liefert (z.B. UTC-Offset-Edge-Case) #}
+      {% set fc = state_attr(weather_entity, 'forecast') %}
+      {{ fc[0].temperature | float(15) if fc and fc | length > 0 else 15 }}
+    {% endif %}
+
+  # Niederschlags-Summe des heutigen Tages (für Rain-Skip, ebenfalls tagesbasiert statt fc[0])
+  regen_summe_heute: >
+    {% set eintraege = heutiges_forecast %}
+    {% if eintraege | length > 0 %}
+      {{ eintraege | map(attribute='precipitation') | select('number') | list | sum }}
+    {% else %}
+      {% set fc = state_attr(weather_entity, 'forecast') %}
+      {{ fc[0].precipitation | float(0) if fc and fc | length > 0 else 0 }}
+    {% endif %}
+
   berechnete_dauer: >
     {{ dauer_kalt if temp_max_heute < schwelle_kalt|float
        else (dauer_heiss if temp_max_heute >= schwelle_heiss|float else dauer_mittel) }}
@@ -176,12 +203,7 @@ conditions:
   # Forecast-Regen-Skip
   - condition: template
     value_template: >
-      {% set fc = state_attr(weather_entity, 'forecast') %}
-      {% if fc is none or fc | length == 0 %}
-        true
-      {% else %}
-        {{ (fc[0].precipitation | float(0)) < regen_schwelle_forecast|float }}
-      {% endif %}
+      {{ regen_summe_heute | float(0) < regen_schwelle_forecast|float }}
 
   # Aktueller-Regen-Skip (optional)
   - condition: template
