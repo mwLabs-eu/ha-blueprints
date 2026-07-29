@@ -1,275 +1,140 @@
-# blueprints/automation/bewaesserung_garten_temperaturabhaengig.yaml
-
 blueprint:
-  name: "Bewässerung Garten – Temperaturabhängig mit Sunrise-Timing & Rain-Skip"
+  name: Garten Bewässerung – Wetterbasiert (Sonoff Zigbee Valve)
   description: >
-    Steuert ein Zigbee2MQTT-Ventil (z.B. Sonoff SWV) basierend auf Wettervorhersage.
-    Der Vorlauf vor Sonnenaufgang entspricht exakt der berechneten Gießdauer
-    (z.B. 20 Minuten Laufzeit → Start 20 Minuten vor Sonnenaufgang, Ende bei Sonnenaufgang).
-    Laufzeit richtet sich nach drei Temperaturstufen (kalt/mittel/heiss).
-    Überspringt die Bewässerung bei ausreichend Niederschlag (Forecast) oder aktuellem Regen.
+    Steuert ein Sonoff Zigbee-Ventil (Z2M) zur Gartenbewässerung.
+    Gießzeit und Vorlaufzeit vor Sonnenaufgang werden anhand der
+    maximal vorhergesagten Tagestemperatur (weather.get_forecasts, daily)
+    dynamisch bestimmt. Regen-Skip inklusive.
   domain: automation
-  source_url: https://github.com/dein-repo/ha-blueprints/bewaesserung_garten.yaml
-
   input:
     valve_entity:
       name: Ventil-Entity
-      description: Z2M Switch- oder Valve-Entity des Bewässerungsventils.
       selector:
         entity:
-          domain:
-            - switch
-            - valve
-
+          domain: switch
     weather_entity:
       name: Wetter-Entity
-      description: Integration mit Forecast-Unterstützung (daily).
       selector:
         entity:
           domain: weather
-
-    notify_service:
-      name: Notify-Ziel (optional)
-      description: Notify-Service-Name ohne "notify."-Präfix für Deadman-Switch-Warnung. Leer lassen zum Deaktivieren.
-      default: ""
+    temp_cold_threshold:
+      name: Schwelle "kalt" (°C, max. Tagestemperatur darunter)
+      default: 18
       selector:
-        text:
-
-    dauer_kalt:
-      name: Laufzeit kalt
-      description: Gießdauer an kalten Tagen. Entspricht gleichzeitig dem Vorlauf vor Sonnenaufgang.
+        number:
+          min: 0
+          max: 40
+          unit_of_measurement: "°C"
+    temp_hot_threshold:
+      name: Schwelle "heiß" (°C, max. Tagestemperatur darüber)
+      default: 28
+      selector:
+        number:
+          min: 0
+          max: 45
+          unit_of_measurement: "°C"
+    duration_cold:
+      name: Gießdauer bei kaltem Wetter (Minuten)
       default: 5
       selector:
         number:
           min: 0
-          max: 90
-          step: 1
+          max: 120
           unit_of_measurement: min
-
-    dauer_mittel:
-      name: Laufzeit mittel
-      default: 12
+    duration_medium:
+      name: Gießdauer bei mittlerem Wetter (Minuten)
+      default: 10
       selector:
         number:
           min: 0
-          max: 90
-          step: 1
+          max: 120
           unit_of_measurement: min
-
-    dauer_heiss:
-      name: Laufzeit heiss
+    duration_hot:
+      name: Gießdauer bei heißem Wetter (Minuten)
       default: 20
       selector:
         number:
           min: 0
           max: 120
-          step: 1
           unit_of_measurement: min
-
-    schwelle_kalt:
-      name: Schwellwert kalt (max Temp unter diesem Wert)
-      default: 15
-      selector:
-        number:
-          min: -10
-          max: 30
-          step: 1
-          unit_of_measurement: "°C"
-
-    schwelle_heiss:
-      name: Schwellwert heiss (max Temp ab diesem Wert)
-      default: 25
-      selector:
-        number:
-          min: 10
-          max: 45
-          step: 1
-          unit_of_measurement: "°C"
-
-    regen_schwelle_forecast:
-      name: Regen-Schwellwert Forecast (skip)
-      description: Vorhergesagte Niederschlagsmenge (mm) am Bewässerungstag, ab der übersprungen wird.
+    rain_skip_threshold:
+      name: Regen-Schwelle für Skip (mm, Tagessumme)
       default: 2
       selector:
         number:
           min: 0
-          max: 30
-          step: 0.5
+          max: 50
           unit_of_measurement: mm
 
-    aktueller_regen_skip:
-      name: Sofort-Skip bei aktuellem Regen
-      description: Überspringt zusätzlich, falls weather_entity aktuell "rainy"/"pouring"/"lightning-rainy" meldet.
-      default: true
-      selector:
-        boolean:
+trigger:
+  - trigger: sun
+    event: sunrise
+    offset: "-02:00:00"
 
-    master_schalter:
-      name: Master-Aktivierung (input_boolean, optional)
-      description: Optionaler input_boolean zur globalen Deaktivierung. Leer lassen um zu ignorieren.
-      default: ""
-      selector:
-        entity:
-          domain: input_boolean
+condition: []
 
-    deadman_timeout:
-      name: Deadman-Switch Timeout
-      description: Maximale Laufzeit, nach der das Ventil zwangsweise geschlossen und eine Warnung gesendet wird.
-      default: 30
-      selector:
-        number:
-          min: 5
-          max: 120
-          step: 5
-          unit_of_measurement: min
-
-variables:
-  valve_entity: !input valve_entity
-  weather_entity: !input weather_entity
-  notify_service: !input notify_service
-  deadman_timeout: !input deadman_timeout
-  dauer_kalt: !input dauer_kalt
-  dauer_mittel: !input dauer_mittel
-  dauer_heiss: !input dauer_heiss
-  schwelle_kalt: !input schwelle_kalt
-  schwelle_heiss: !input schwelle_heiss
-  regen_schwelle_forecast: !input regen_schwelle_forecast
-  aktueller_regen_skip: !input aktueller_regen_skip
-  master_schalter: !input master_schalter
-
-  # Forecast-Array des heutigen Tages filtern (Datumsvergleich statt Index-Annahme)
-  heutiges_forecast:
-    "{{ state_attr(weather_entity, 'forecast')
-        | default([], true)
-        | selectattr('datetime', 'defined')
-        | selectattr('datetime', 'match', '^' + now().strftime('%Y-%m-%d')) 
-        | list }}"
-
-  # Tagesmaximum aus allen heutigen Einträgen (deckt sowohl daily- als auch hourly-Forecasts ab)
-  temp_max_heute: >
-    {% set eintraege = heutiges_forecast %}
-    {% if eintraege | length > 0 %}
-      {{ eintraege | map(attribute='temperature') | select('number') | list | max }}
-    {% else %}
-      {# Fallback: erster Forecast-Eintrag, falls Datumsfilter nichts liefert (z.B. UTC-Offset-Edge-Case) #}
-      {% set fc = state_attr(weather_entity, 'forecast') %}
-      {{ fc[0].temperature | float(15) if fc and fc | length > 0 else 15 }}
-    {% endif %}
-
-  # Niederschlags-Summe des heutigen Tages (für Rain-Skip, ebenfalls tagesbasiert statt fc[0])
-  regen_summe_heute: >
-    {% set eintraege = heutiges_forecast %}
-    {% if eintraege | length > 0 %}
-      {{ eintraege | map(attribute='precipitation') | select('number') | list | sum }}
-    {% else %}
-      {% set fc = state_attr(weather_entity, 'forecast') %}
-      {{ fc[0].precipitation | float(0) if fc and fc | length > 0 else 0 }}
-    {% endif %}
-
-  berechnete_dauer: >
-    {{ dauer_kalt if temp_max_heute < schwelle_kalt|float
-       else (dauer_heiss if temp_max_heute >= schwelle_heiss|float else dauer_mittel) }}
-
-triggers:
-  - trigger: time_pattern
-    minutes: "/5"
-
-conditions:
-  # Master-Schalter, falls konfiguriert
-  - condition: template
-    value_template: >
-      {% if master_schalter | length > 0 %}
-        {{ is_state(master_schalter, 'on') }}
-      {% else %}
-        true
-      {% endif %}
-
-  # Ventil aktuell geschlossen
-  - condition: template
-    value_template: "{{ is_state(valve_entity, 'off') or is_state(valve_entity, 'closed') }}"
-
-  # Fenster: berechneter Startzeitpunkt erreicht (10-Minuten-Toleranzfenster)
-  # Startzeitpunkt = Sonnenaufgang - berechnete_dauer (Ende der Bewässerung fällt exakt auf Sonnenaufgang)
-  - condition: template
-    value_template: >
-      {% set sunrise = state_attr('sun.sun', 'next_rising') %}
-      {% if sunrise is none %}
-        false
-      {% else %}
-        {% set start = as_datetime(sunrise) - timedelta(minutes=berechnete_dauer|float) %}
-        {{ now() >= start and now() < (start + timedelta(minutes=10)) }}
-      {% endif %}
-
-  # Forecast-Regen-Skip
-  - condition: template
-    value_template: >
-      {{ regen_summe_heute | float(0) < regen_schwelle_forecast|float }}
-
-  # Aktueller-Regen-Skip (optional)
-  - condition: template
-    value_template: >
-      {% if not aktueller_regen_skip %}
-        true
-      {% else %}
-        {{ states(weather_entity) not in ['rainy', 'pouring', 'lightning-rainy', 'snowy', 'snowy-rainy'] }}
-      {% endif %}
-
-  # Laufzeit muss > 0 sein
-  - condition: template
-    value_template: "{{ berechnete_dauer | float > 0 }}"
-
-actions:
-  - action: >
-      {{ 'switch.turn_on' if valve_entity.split('.')[0] == 'switch' else 'valve.open_valve' }}
+action:
+  - action: weather.get_forecasts
     target:
-      entity_id: "{{ valve_entity }}"
+      entity_id: !input weather_entity
+    data:
+      type: daily
+    response_variable: forecast_response
 
-  - wait_template: "{{ is_state(valve_entity, 'on') or is_state(valve_entity, 'open') }}"
-    timeout:
-      seconds: 30
-    continue_on_timeout: true
+  - variables:
+      weather_entity_id: !input weather_entity
+      heutiges_forecast: "{{ forecast_response[weather_entity_id].forecast[0] }}"
+      max_temp: "{{ heutiges_forecast.temperature | float(0) }}"
+      niederschlag: "{{ heutiges_forecast.precipitation | float(0) }}"
+      cold_threshold: !input temp_cold_threshold
+      hot_threshold: !input temp_hot_threshold
+      rain_threshold: !input rain_skip_threshold
+      duration_cold_min: !input duration_cold
+      duration_medium_min: !input duration_medium
+      duration_hot_min: !input duration_hot
+      gießdauer_min: >
+        {% if max_temp < cold_threshold %}
+          {{ duration_cold_min }}
+        {% elif max_temp >= hot_threshold %}
+          {{ duration_hot_min }}
+        {% else %}
+          {{ duration_medium_min }}
+        {% endif %}
+      vorlauf_min: "{{ gießdauer_min }}"
 
-  - parallel:
-      # Regulärer Ablauf: nach berechneter Dauer schließen
-      - sequence:
-          - delay:
-              minutes: "{{ berechnete_dauer | int }}"
-          - action: >
-              {{ 'switch.turn_off' if valve_entity.split('.')[0] == 'switch' else 'valve.close_valve' }}
-            target:
-              entity_id: "{{ valve_entity }}"
+  - if:
+      - condition: template
+        value_template: "{{ niederschlag >= rain_threshold }}"
+    then:
+      - action: logbook.log
+        data:
+          name: Garten Bewässerung
+          message: >
+            Übersprungen – Niederschlag {{ niederschlag }} mm
+            (Schwelle {{ rain_threshold }} mm)
+    else:
+      - delay:
+          seconds: 0
+      - wait_for_trigger:
+          - trigger: time
+            at: >
+              {{ (as_datetime(state_attr('sun.sun', 'next_rising'))
+                  - timedelta(minutes=vorlauf_min | int))
+                  .strftime('%H:%M:%S') }}
+        timeout:
+          minutes: 5
+        continue_on_timeout: true
 
-      # Deadman-Switch: Failsafe bei hängendem Zustand
-      - sequence:
-          - wait_for_trigger:
-              - trigger: state
-                entity_id: !input valve_entity
-                to:
-                  - "off"
-                  - "closed"
-            timeout:
-              minutes: !input deadman_timeout
-            continue_on_timeout: true
-          - if:
-              - condition: template
-                value_template: >
-                  {{ is_state(valve_entity, 'on') or is_state(valve_entity, 'open') }}
-            then:
-              - action: >
-                  {{ 'switch.turn_off' if valve_entity.split('.')[0] == 'switch' else 'valve.close_valve' }}
-                target:
-                  entity_id: "{{ valve_entity }}"
-              - if:
-                  - condition: template
-                    value_template: "{{ notify_service | length > 0 }}"
-                then:
-                  - action: "notify.{{ notify_service }}"
-                    data:
-                      title: "⚠️ Bewässerung Garten"
-                      message: >
-                        Ventil {{ valve_entity }} war länger als
-                        {{ deadman_timeout }} Minuten aktiv.
-                        Zwangsschließung ausgeführt. Manuelle Prüfung erforderlich.
+      - action: switch.turn_on
+        target:
+          entity_id: !input valve_entity
+
+      - delay:
+          minutes: "{{ gießdauer_min | int }}"
+
+      - action: switch.turn_off
+        target:
+          entity_id: !input valve_entity
 
 mode: single
 max_exceeded: silent
