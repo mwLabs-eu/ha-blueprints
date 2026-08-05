@@ -47,7 +47,7 @@ blueprint:
       selector:
         number:
           min: 0
-          max: 120
+          max: 180
           unit_of_measurement: min
     duration_hot:
       name: Gießdauer bei heißem Wetter (Minuten)
@@ -55,7 +55,7 @@ blueprint:
       selector:
         number:
           min: 0
-          max: 120
+          max: 240
           unit_of_measurement: min
     rain_skip_threshold:
       name: Regen-Schwelle für Skip (mm, Tagessumme)
