@@ -5,6 +5,8 @@ blueprint:
     Gießzeit und Vorlaufzeit vor Sonnenaufgang werden anhand der
     maximal vorhergesagten Tagestemperatur (weather.get_forecasts, daily)
     dynamisch bestimmt. Regen-Skip inklusive.
+    Mit Fehlerprüfung: Ventil-Status nach Befehlen validiert,
+    Benachrichtigung bei Fehlschlag.
   domain: automation
   input:
     valve_entity:
@@ -17,6 +19,13 @@ blueprint:
       selector:
         entity:
           domain: weather
+    notify_service:
+      name: Benachrichtigungs-Service
+      description: >
+        z.B. notify.mobile_app_dein_handy oder notify.telegram
+      default: notify.notify
+      selector:
+        text:
     temp_cold_threshold:
       name: Schwelle "kalt" (°C, max. Tagestemperatur darunter)
       default: 18
@@ -65,6 +74,14 @@ blueprint:
           min: 0
           max: 50
           unit_of_measurement: mm
+    status_check_delay:
+      name: Wartezeit vor Statusprüfung nach Befehl (Sekunden)
+      default: 3
+      selector:
+        number:
+          min: 1
+          max: 10
+          unit_of_measurement: s
 
 trigger:
   - trigger: sun
@@ -86,19 +103,19 @@ action:
       heutiges_forecast: "{{ forecast_response[weather_entity_id].forecast[0] }}"
       max_temp: "{{ heutiges_forecast.temperature | float(0) }}"
       niederschlag: "{{ heutiges_forecast.precipitation | float(0) }}"
-      cold_threshold: !input temp_cold_threshold
-      hot_threshold: !input temp_hot_threshold
       rain_threshold: !input rain_skip_threshold
-      duration_cold_min: !input duration_cold
-      duration_medium_min: !input duration_medium
-      duration_hot_min: !input duration_hot
+      temp_cold: !input temp_cold_threshold
+      temp_hot: !input temp_hot_threshold
+      duration_cold: !input duration_cold
+      duration_medium: !input duration_medium
+      duration_hot: !input duration_hot
       gießdauer_min: >
-        {% if max_temp < cold_threshold %}
-          {{ duration_cold_min }}
-        {% elif max_temp >= hot_threshold %}
-          {{ duration_hot_min }}
+        {% if max_temp <= temp_cold %}
+          {{ duration_cold }}
+        {% elif max_temp >= temp_hot %}
+          {{ duration_hot }}
         {% else %}
-          {{ duration_medium_min }}
+          {{ duration_medium }}
         {% endif %}
       vorlauf_min: "{{ gießdauer_min }}"
 
@@ -125,16 +142,65 @@ action:
           minutes: 5
         continue_on_timeout: true
 
+      # ===== VENTIL ÖFFNEN + STATUSPRÜFUNG =====
       - action: switch.turn_on
         target:
           entity_id: !input valve_entity
 
       - delay:
+          seconds: !input status_check_delay
+
+      - if:
+          - condition: state
+            entity_id: !input valve_entity
+            state: "on"
+        then:
+          - action: logbook.log
+            data:
+              name: Garten Bewässerung
+              message: >
+                Ventil geöffnet erfolgreich.
+                Gießdauer: {{ gießdauer_min }} min
+                (Max-Temp: {{ max_temp }}°C)
+        else:
+          - action: !input notify_service
+            data:
+              title: "⚠️ Garten Bewässerung – Fehler"
+              message: >
+                Ventil konnte nicht geöffnet werden!
+                Entity: {{ valve_entity }}
+                State: {{ states(valve_entity) }}
+          - stop: Ventil öffnen fehlgeschlagen
+
+      - delay:
           minutes: "{{ gießdauer_min | int }}"
 
+      # ===== VENTIL SCHLIESSEN + STATUSPRÜFUNG =====
       - action: switch.turn_off
         target:
           entity_id: !input valve_entity
+
+      - delay:
+          seconds: !input status_check_delay
+
+      - if:
+          - condition: state
+            entity_id: !input valve_entity
+            state: "off"
+        then:
+          - action: logbook.log
+            data:
+              name: Garten Bewässerung
+              message: "Ventil geschlossen erfolgreich."
+        else:
+          - action: !input notify_service
+            data:
+              title: "⚠️ Garten Bewässerung – Fehler"
+              message: >
+                Ventil konnte nicht geschlossen werden!
+                Entity: {{ valve_entity }}
+                State: {{ states(valve_entity) }}
+          - stop: Ventil schließen fehlgeschlagen
 
 mode: single
 max_exceeded: silent
