@@ -23,10 +23,8 @@ blueprint:
     notify_action:
       name: Benachrichtigungs-Aktion
       description: >
-        Beliebig viele Notify-Aktionen hinzufügen. Verfügbare Variablen
-        im Template-Scope: title, message.
-        Beispiel: Aktion "notify.mobile_app_pixel" mit Daten
-        title "{{ title }}" und message "{{ message }}".
+        Beliebig viele Notify-Aktionen. Variablen im Template-Scope:
+        title, message.
       selector:
         action: {}
     temp_cold_threshold:
@@ -95,8 +93,8 @@ blueprint:
     max_runtime_minutes:
       name: Hartes Maximallaufzeit-Limit (Minuten)
       description: >
-        Absolute Obergrenze. Ist das Ventil länger als dieser Wert offen,
-        wird es unabhängig vom Hauptablauf zwangsgeschlossen.
+        Absolute Obergrenze. Ist das Ventil länger offen, wird es
+        unabhängig vom Hauptablauf zwangsgeschlossen.
       default: 45
       selector:
         number:
@@ -159,7 +157,8 @@ actions:
                 ACHTUNG: Ventil meldet weiterhin NICHT 'off'!
                 Manuelle Prüfung erforderlich!
                 {% endif %}
-          - sequence: !input notify_action
+          - choose: []
+            default: !input notify_action
 
       # ===== HA-NEUSTART: Verwaistes offenes Ventil =====
       - conditions:
@@ -189,7 +188,8 @@ actions:
               message: >
                 Nach HA-Start war das Ventil offen. Sicherheits-Abschaltung
                 ausgeführt. Status: {{ states(valve) }}.
-          - sequence: !input notify_action
+          - choose: []
+            default: !input notify_action
 
       # ===== REGULÄRER ABLAUF =====
       - conditions:
@@ -207,7 +207,8 @@ actions:
                   message: >
                     Bewässerung abgebrochen. Ventil {{ valve }} meldet
                     '{{ states(valve) }}'.
-              - sequence: !input notify_action
+              - choose: []
+                default: !input notify_action
               - stop: Ventil nicht verfügbar
 
           - action: weather.get_forecasts
@@ -229,7 +230,7 @@ actions:
               duration_cold: !input duration_cold
               duration_medium: !input duration_medium
               duration_hot: !input duration_hot
-              gießdauer_min: >
+              gießdauer_raw: >
                 {% if max_temp <= temp_cold %}
                   {{ duration_cold }}
                 {% elif max_temp >= temp_hot %}
@@ -241,9 +242,9 @@ actions:
           # Laufzeit auf Watchdog-Limit begrenzen
           - variables:
               gießdauer_min: >
-                {{ [gießdauer_min | int, (max_runtime | int) - 5] | min }}
+                {{ [gießdauer_raw | int, (max_runtime | int) - 5] | min }}
               vorlauf_min: >
-                {{ [gießdauer_min | int, (max_runtime | int) - 5] | min }}
+                {{ [gießdauer_raw | int, (max_runtime | int) - 5] | min }}
 
           - if:
               - condition: template
@@ -300,7 +301,8 @@ actions:
                         Ventil meldet nach {{ retries }} Versuchen nicht 'on'.
                         Status: {{ states(valve) }}.
                         Vorsorglicher Schließbefehl gesendet.
-                  - sequence: !input notify_action
+                  - choose: []
+                    default: !input notify_action
                   - stop: Ventil öffnen fehlgeschlagen
 
               - action: logbook.log
@@ -347,7 +349,8 @@ actions:
                         Status: {{ states(valve) }}.
                         MANUELL PRÜFEN! Watchdog schließt nach
                         {{ max_runtime }} min erneut.
-                  - sequence: !input notify_action
+                  - choose: []
+                    default: !input notify_action
 
 mode: single
 max_exceeded: silent
