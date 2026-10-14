@@ -3,10 +3,11 @@ blueprint:
   description: >
     Steuert ein Sonoff Zigbee-Ventil (Z2M) zur Gartenbewässerung.
     Gießzeit und Vorlaufzeit vor Sonnenaufgang werden anhand der
-    maximal vorhergesagten Tagestemperatur (weather.get_forecasts, daily)
-    dynamisch bestimmt. Regen-Skip inklusive.
-    Mit Fehlerprüfung: Ventil-Status nach Befehlen validiert,
-    Benachrichtigung bei Fehlschlag.
+    maximal vorhergesagten Tagestemperatur dynamisch bestimmt.
+    Regen-Skip inklusive.
+    Sicherheitsmechanismen: Verfügbarkeitsprüfung, Retries,
+    Watchdog mit hartem Laufzeitlimit, Notfall-Abschaltung
+    bei überschrittener Maximallaufzeit.
   domain: automation
   input:
     valve_entity:
@@ -19,14 +20,17 @@ blueprint:
       selector:
         entity:
           domain: weather
-    notify_devices:
-      name: Benachrichtigungs-Geräte
-      description: Ein oder mehrere Geräte auswählen (Mobile App etc.)
+    notify_action:
+      name: Benachrichtigungs-Aktion
+      description: >
+        Aktion(en) für Benachrichtigungen. Beliebig viele Notify-Aktionen
+        hinzufügen. Verfügbare Variablen: title, message.
+        Beispiel: Aktion "notify.mobile_app_pixel" mit Daten
+        title: "{{ title }}" und message: "{{ message }}".
       selector:
-        device:
-          multiple: true
+        action: {}
     temp_cold_threshold:
-      name: Schwelle "kalt" (°C, max. Tagestemperatur darunter)
+      name: Schwelle "kalt" (°C)
       default: 18
       selector:
         number:
@@ -34,7 +38,7 @@ blueprint:
           max: 40
           unit_of_measurement: "°C"
     temp_hot_threshold:
-      name: Schwelle "heiß" (°C, max. Tagestemperatur darüber)
+      name: Schwelle "heiß" (°C)
       default: 28
       selector:
         number:
@@ -66,7 +70,7 @@ blueprint:
           max: 240
           unit_of_measurement: min
     rain_skip_threshold:
-      name: Regen-Schwelle für Skip (mm, Tagessumme)
+      name: Regen-Schwelle für Skip (mm)
       default: 2
       selector:
         number:
@@ -74,142 +78,283 @@ blueprint:
           max: 50
           unit_of_measurement: mm
     status_check_delay:
-      name: Wartezeit vor Statusprüfung nach Befehl (Sekunden)
+      name: Wartezeit vor Statusprüfung (Sekunden)
+      default: 5
+      selector:
+        number:
+          min: 1
+          max: 30
+          unit_of_measurement: s
+    max_retries:
+      name: Maximale Retries bei Schaltfehlern
       default: 3
       selector:
         number:
           min: 1
           max: 10
-          unit_of_measurement: s
+    max_runtime_minutes:
+      name: Hartes Maximallaufzeit-Limit (Minuten)
+      description: >
+        Absolute Obergrenze. Ist das Ventil länger als dieser Wert offen,
+        wird es unabhängig vom Hauptablauf zwangsgeschlossen.
+      default: 45
+      selector:
+        number:
+          min: 5
+          max: 480
+          unit_of_measurement: min
 
 trigger:
   - trigger: sun
     event: sunrise
     offset: "-02:00:00"
+    id: scheduled_start
+  - trigger: state
+    entity_id: !input valve_entity
+    to: "on"
+    for:
+      minutes: !input max_runtime_minutes
+    id: watchdog_overrun
+  - trigger: homeassistant
+    event: start
+    id: ha_restart
 
 condition: []
 
+variables:
+  valve: !input valve_entity
+  retries: !input max_retries
+  check_delay: !input status_check_delay
+  max_runtime: !input max_runtime_minutes
+
 action:
-  - action: weather.get_forecasts
-    target:
-      entity_id: !input weather_entity
-    data:
-      type: daily
-    response_variable: forecast_response
+  - choose:
+      # ===== WATCHDOG: Ventil zu lange offen =====
+      - conditions:
+          - condition: trigger
+            id: watchdog_overrun
+        sequence:
+          - repeat:
+              sequence:
+                - action: switch.turn_off
+                  target:
+                    entity_id: !input valve_entity
+                - delay:
+                    seconds: "{{ check_delay | int }}"
+              until:
+                - condition: or
+                  conditions:
+                    - condition: state
+                      entity_id: !input valve_entity
+                      state: "off"
+                    - condition: template
+                      value_template: "{{ repeat.index >= retries | int }}"
+          - variables:
+              title: "🚨 Garten Bewässerung – Watchdog"
+              message: >
+                Ventil war länger als {{ max_runtime }} min geöffnet.
+                Zwangsabschaltung ausgeführt. Aktueller Status:
+                {{ states(valve) }}.
+                {% if not is_state(valve, 'off') %}
+                ACHTUNG: Ventil meldet weiterhin NICHT 'off'!
+                Manuelle Prüfung erforderlich!
+                {% endif %}
+          - alias: Benachrichtigung Watchdog
+            action: script.turn_on
+            target:
+              entity_id: []
+            enabled: false
+          - !input notify_action
 
-  - variables:
-      weather_entity_id: !input weather_entity
-      heutiges_forecast: "{{ forecast_response[weather_entity_id].forecast[0] }}"
-      max_temp: "{{ heutiges_forecast.temperature | float(0) }}"
-      niederschlag: "{{ heutiges_forecast.precipitation | float(0) }}"
-      rain_threshold: !input rain_skip_threshold
-      temp_cold: !input temp_cold_threshold
-      temp_hot: !input temp_hot_threshold
-      duration_cold: !input duration_cold
-      duration_medium: !input duration_medium
-      duration_hot: !input duration_hot
-      gießdauer_min: >
-        {% if max_temp <= temp_cold %}
-          {{ duration_cold }}
-        {% elif max_temp >= temp_hot %}
-          {{ duration_hot }}
-        {% else %}
-          {{ duration_medium }}
-        {% endif %}
-      vorlauf_min: "{{ gießdauer_min }}"
-
-  - if:
-      - condition: template
-        value_template: "{{ niederschlag >= rain_threshold }}"
-    then:
-      - action: logbook.log
-        data:
-          name: Garten Bewässerung
-          message: >
-            Übersprungen – Niederschlag {{ niederschlag }} mm
-            (Schwelle {{ rain_threshold }} mm)
-    else:
-      - delay:
-          seconds: 0
-      - wait_for_trigger:
-          - trigger: time
-            at: >
-              {{ (as_datetime(state_attr('sun.sun', 'next_rising'))
-                  - timedelta(minutes=vorlauf_min | int))
-                  .strftime('%H:%M:%S') }}
-        timeout:
-          minutes: 5
-        continue_on_timeout: true
-
-      # ===== VENTIL ÖFFNEN + STATUSPRÜFUNG =====
-      - action: switch.turn_on
-        target:
-          entity_id: !input valve_entity
-
-      - delay:
-          seconds: !input status_check_delay
-
-      - if:
+      # ===== HA-NEUSTART: Verwaistes offenes Ventil =====
+      - conditions:
+          - condition: trigger
+            id: ha_restart
           - condition: state
             entity_id: !input valve_entity
             state: "on"
-        then:
-          - action: logbook.log
-            data:
-              name: Garten Bewässerung
+        sequence:
+          - repeat:
+              sequence:
+                - action: switch.turn_off
+                  target:
+                    entity_id: !input valve_entity
+                - delay:
+                    seconds: "{{ check_delay | int }}"
+              until:
+                - condition: or
+                  conditions:
+                    - condition: state
+                      entity_id: !input valve_entity
+                      state: "off"
+                    - condition: template
+                      value_template: "{{ repeat.index >= retries | int }}"
+          - variables:
+              title: "⚠️ Garten Bewässerung – Neustart"
               message: >
-                Ventil geöffnet erfolgreich.
-                Gießdauer: {{ gießdauer_min }} min
-                (Max-Temp: {{ max_temp }}°C)
-        else:
-          - repeat:
-              for_each: !input notify_devices
-              sequence:
-                - action: notify.send_message
-                  data:
-                    title: "⚠️ Garten Bewässerung – Fehler"
-                    message: >
-                      Ventil konnte nicht geöffnet werden!
-                      Entity: {{ valve_entity }}
-                      State: {{ states(valve_entity) }}
-                  target:
-                    device_id: "{{ repeat.item }}"
-          - stop: Ventil öffnen fehlgeschlagen
+                Nach HA-Start war das Ventil offen. Sicherheits-Abschaltung
+                ausgeführt. Status: {{ states(valve) }}.
+          - !input notify_action
 
-      - delay:
-          minutes: "{{ gießdauer_min | int }}"
+      # ===== REGULÄRER ABLAUF =====
+      - conditions:
+          - condition: trigger
+            id: scheduled_start
+        sequence:
+          # Verfügbarkeitsprüfung
+          - if:
+              - condition: template
+                value_template: >
+                  {{ states(valve) in ['unavailable', 'unknown'] }}
+            then:
+              - variables:
+                  title: "⚠️ Garten Bewässerung – Ventil nicht erreichbar"
+                  message: >
+                    Bewässerung abgebrochen. Ventil {{ valve }} meldet
+                    '{{ states(valve) }}'.
+              - !input notify_action
+              - stop: Ventil nicht verfügbar
 
-      # ===== VENTIL SCHLIESSEN + STATUSPRÜFUNG =====
-      - action: switch.turn_off
-        target:
-          entity_id: !input valve_entity
-
-      - delay:
-          seconds: !input status_check_delay
-
-      - if:
-          - condition: state
-            entity_id: !input valve_entity
-            state: "off"
-        then:
-          - action: logbook.log
+          - action: weather.get_forecasts
+            target:
+              entity_id: !input weather_entity
             data:
-              name: Garten Bewässerung
-              message: "Ventil geschlossen erfolgreich."
-        else:
-          - repeat:
-              for_each: !input notify_devices
-              sequence:
-                - action: notify.send_message
-                  data:
-                    title: "⚠️ Garten Bewässerung – Fehler"
-                    message: >
-                      Ventil konnte nicht geschlossen werden!
-                      Entity: {{ valve_entity }}
-                      State: {{ states(valve_entity) }}
-                  target:
-                    device_id: "{{ repeat.item }}"
-          - stop: Ventil schließen fehlgeschlagen
+              type: daily
+            response_variable: forecast_response
+
+          - variables:
+              weather_entity_id: !input weather_entity
+              heutiges_forecast: >
+                {{ forecast_response[weather_entity_id].forecast[0] }}
+              max_temp: "{{ heutiges_forecast.temperature | float(0) }}"
+              niederschlag: "{{ heutiges_forecast.precipitation | float(0) }}"
+              rain_threshold: !input rain_skip_threshold
+              temp_cold: !input temp_cold_threshold
+              temp_hot: !input temp_hot_threshold
+              duration_cold: !input duration_cold
+              duration_medium: !input duration_medium
+              duration_hot: !input duration_hot
+              gießdauer_min: >
+                {% if max_temp <= temp_cold %}
+                  {{ duration_cold }}
+                {% elif max_temp >= temp_hot %}
+                  {{ duration_hot }}
+                {% else %}
+                  {{ duration_medium }}
+                {% endif %}
+              vorlauf_min: "{{ gießdauer_min }}"
+
+          # Plausibilitätsprüfung Laufzeit vs. Watchdog
+          - if:
+              - condition: template
+                value_template: "{{ gießdauer_min | int >= max_runtime | int }}"
+            then:
+              - variables:
+                  gießdauer_min: "{{ (max_runtime | int) - 5 }}"
+
+          - if:
+              - condition: template
+                value_template: "{{ niederschlag >= rain_threshold }}"
+            then:
+              - action: logbook.log
+                data:
+                  name: Garten Bewässerung
+                  message: >
+                    Übersprungen – Niederschlag {{ niederschlag }} mm
+                    (Schwelle {{ rain_threshold }} mm)
+            else:
+              - wait_for_trigger:
+                  - trigger: time
+                    at: >
+                      {{ (as_datetime(state_attr('sun.sun', 'next_rising'))
+                          - timedelta(minutes=vorlauf_min | int))
+                          .strftime('%H:%M:%S') }}
+                timeout:
+                  minutes: 5
+                continue_on_timeout: true
+
+              # ===== ÖFFNEN MIT RETRY =====
+              - repeat:
+                  sequence:
+                    - action: switch.turn_on
+                      target:
+                        entity_id: !input valve_entity
+                    - delay:
+                        seconds: "{{ check_delay | int }}"
+                  until:
+                    - condition: or
+                      conditions:
+                        - condition: state
+                          entity_id: !input valve_entity
+                          state: "on"
+                        - condition: template
+                          value_template: "{{ repeat.index >= retries | int }}"
+
+              - if:
+                  - condition: not
+                    conditions:
+                      - condition: state
+                        entity_id: !input valve_entity
+                        state: "on"
+                then:
+                  # Sicherheitshalber Schließbefehl senden (Status evtl. nur nicht gemeldet)
+                  - action: switch.turn_off
+                    target:
+                      entity_id: !input valve_entity
+                  - variables:
+                      title: "⚠️ Garten Bewässerung – Öffnen fehlgeschlagen"
+                      message: >
+                        Ventil meldet nach {{ retries }} Versuchen nicht 'on'.
+                        Status: {{ states(valve) }}.
+                        Vorsorglicher Schließbefehl gesendet.
+                  - !input notify_action
+                  - stop: Ventil öffnen fehlgeschlagen
+
+              - action: logbook.log
+                data:
+                  name: Garten Bewässerung
+                  message: >
+                    Ventil geöffnet. Gießdauer: {{ gießdauer_min }} min
+                    (Max-Temp: {{ max_temp }}°C)
+
+              - delay:
+                  minutes: "{{ gießdauer_min | int }}"
+
+              # ===== SCHLIESSEN MIT RETRY (stärker abgesichert) =====
+              - repeat:
+                  sequence:
+                    - action: switch.turn_off
+                      target:
+                        entity_id: !input valve_entity
+                    - delay:
+                        seconds: "{{ check_delay | int }}"
+                  until:
+                    - condition: or
+                      conditions:
+                        - condition: state
+                          entity_id: !input valve_entity
+                          state: "off"
+                        - condition: template
+                          value_template: "{{ repeat.index >= retries | int }}"
+
+              - if:
+                  - condition: state
+                    entity_id: !input valve_entity
+                    state: "off"
+                then:
+                  - action: logbook.log
+                    data:
+                      name: Garten Bewässerung
+                      message: "Ventil geschlossen erfolgreich."
+                else:
+                  - variables:
+                      title: "🚨 Garten Bewässerung – SCHLIESSEN FEHLGESCHLAGEN"
+                      message: >
+                        Ventil meldet nach {{ retries }} Versuchen nicht 'off'.
+                        Status: {{ states(valve) }}.
+                        MANUELL PRÜFEN! Watchdog schließt nach
+                        {{ max_runtime }} min erneut.
+                  - !input notify_action
 
 mode: single
 max_exceeded: silent
