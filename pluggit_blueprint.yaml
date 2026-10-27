@@ -27,6 +27,8 @@ blueprint:
     - Step-down hysteresis via timer helper: steps up immediately, steps down only
       after demand stayed below threshold minus deadband for the configured time.
 
+    - Summer/winter switch: open windows only stop the unit in winter.
+
     - Shower detection by absolute threshold, rise above house average and/or rate
       of rise (derivative sensor), with drop threshold and run-off timer.
 
@@ -40,6 +42,9 @@ blueprint:
 
     **Required helpers:** input_select (dashboard), input_boolean (summer mode),
     2× timer (shower run-off, step-down). Enable "Restore state" on both timers.
+
+    **Optional helper:** Derivative sensor on the bathroom humidity sensor
+    (shower detection by rate of rise).
   domain: automation
   homeassistant:
     min_version: "2024.10.0"
@@ -47,6 +52,7 @@ blueprint:
     devices_section:
       name: Devices & Helpers
       icon: mdi:fan
+      collapsed: true
       input:
         override_select:
           name: Dashboard Override Helper (Input Select)
@@ -66,14 +72,6 @@ blueprint:
           selector:
             entity:
               domain: select
-        device_auto_label:
-          name: Dashboard Option for Pluggit Automatic Mode
-          description: >
-            The input_select option that hands control to the Pluggit's own
-            automatic mode.
-          default: Automatisch (Anlage)
-          selector:
-            text:
         summer_switch:
           name: Summer Mode Switch (Input Boolean)
           description: >
@@ -99,6 +97,7 @@ blueprint:
     sensors_section:
       name: Air Quality Sensors
       icon: mdi:water-percent
+      collapsed: true
       input:
         humidity_sensors:
           name: Humidity Sensors (General)
@@ -117,6 +116,7 @@ blueprint:
     thresholds_section:
       name: Demand Thresholds
       icon: mdi:stairs
+      collapsed: true
       input:
         hum_mid:
           name: Humidity Threshold – Level 2
@@ -173,13 +173,15 @@ blueprint:
     hysteresis_section:
       name: Level Hysteresis
       icon: mdi:timer-sand
+      collapsed: true
       input:
         step_down_delay:
           name: Step-Down Hysteresis (Minutes)
           description: >
             Demand must stay below the current level's threshold (minus deadband)
-            for this long before the fan steps down one level. Stepping up always
-            happens immediately. 0 = step down immediately.
+            for this long before the fan steps down to the level matching the
+            current demand. Stepping up always happens immediately. Not applied
+            after a shower run-off or a dashboard change. 0 = step down immediately.
           default: 10
           selector:
             number:
@@ -217,6 +219,7 @@ blueprint:
     shower_section:
       name: Shower Detection
       icon: mdi:shower-head
+      collapsed: true
       input:
         bathroom_humidity_sensor:
           name: Bathroom Humidity Sensor
@@ -284,6 +287,9 @@ blueprint:
               mode: slider
         shower_runoff_minutes:
           name: Post-Shower Run-Off Time (Minutes)
+          description: >
+            How long the boost continues after bathroom humidity fell below the end
+            threshold.
           default: 15
           selector:
             number:
@@ -294,6 +300,9 @@ blueprint:
               mode: slider
         shower_fan_level:
           name: Shower Mode Fan Level
+          description: >
+            Minimum fan level during shower boost and run-off. Not limited by night
+            quiet mode.
           default: 4
           selector:
             number:
@@ -340,6 +349,9 @@ blueprint:
               multiple: true
         window_open_delay:
           name: Window-Open Hysteresis (Minutes)
+          description: >
+            A window must be open this long before the unit goes to standby
+            (winter only). Short airing does not stop the ventilation.
           default: 5
           selector:
             number:
@@ -349,8 +361,10 @@ blueprint:
               unit_of_measurement: min
               mode: slider
         fireplace_sensor:
-          name: Fireplace Sensor (Optional)
-          description: Binary sensor indicating active fireplace. Leave empty if not used.
+          name: Fireplace Sensors (Optional)
+          description: >
+            Binary sensors indicating an active fireplace (any "on" → fireplace
+            mode). Leave empty if not used.
           default: []
           selector:
             entity:
@@ -373,6 +387,9 @@ blueprint:
               multiple: true
         outdoor_temp_sensor:
           name: Outdoor Temperature Sensor
+          description: >
+            The check is only active when indoor temperature, outdoor temperature
+            and outdoor humidity are all set.
           default: ""
           selector:
             entity:
@@ -418,6 +435,7 @@ blueprint:
               mode: box
         night_start:
           name: Night Start
+          description: The window may span midnight (e.g. 22:00 → 06:00).
           default: "22:00:00"
           selector:
             time:
@@ -430,7 +448,7 @@ blueprint:
 # Queued instead of restart: no long waits anymore, and every timer.finished
 # event must be processed.
 mode: queued
-max: 10
+max: 25
 max_exceeded: silent
 
 # ── Triggers ──
@@ -502,7 +520,8 @@ variables:
   override_sel: !input override_select
   mode_ent: !input mode_entity
   fan_ent: !input fan_entity
-  device_auto_label: !input device_auto_label
+  # Dashboard input_select option that hands control to the Pluggit
+  device_auto_label: "Automatisch (Anlage)"
   # Pluggit mode select option for the unit's own automatic mode
   device_auto_option: automatic
   summer_ent: !input summer_switch
@@ -700,10 +719,11 @@ variables:
   # Blueprint demand control is in charge of the fan right now
   bp_auto_active: >
     {{ target_mode | trim == 'manual' and ov_auto and not shower_applies }}
-  # Step-down allowed now: hysteresis elapsed, or shower run-off just ended
+  # Step-down allowed now: hysteresis elapsed, shower run-off just ended,
+  # or the user just switched the dashboard (e.g. Manuell: Stufe 4 → Auto)
   stepdown_now: >
     {{ step_down_delay | float(0) == 0
-       or trig_id in ['stepdown_finished', 'shower_finished'] }}
+       or trig_id in ['stepdown_finished', 'shower_finished', 'override_change'] }}
   auto_level: >
     {%- set raw = raw_level | int(1) -%}
     {%- set hold = hold_level | int(1) -%}
