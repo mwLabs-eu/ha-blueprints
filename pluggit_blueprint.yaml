@@ -74,15 +74,6 @@ blueprint:
           default: Automatisch (Anlage)
           selector:
             text:
-        device_auto_option:
-          name: Pluggit Mode Option for Automatic Mode
-          description: >
-            The option of the Pluggit mode select that activates the unit's automatic
-            mode. Check the exact name under Developer Tools → States → your mode
-            select → attribute "options".
-          default: automatic
-          selector:
-            text:
         summer_switch:
           name: Summer Mode Switch (Input Boolean)
           description: >
@@ -512,7 +503,8 @@ variables:
   mode_ent: !input mode_entity
   fan_ent: !input fan_entity
   device_auto_label: !input device_auto_label
-  device_auto_option: !input device_auto_option
+  # Pluggit mode select option for the unit's own automatic mode
+  device_auto_option: automatic
   summer_ent: !input summer_switch
   sd_timer: !input stepdown_timer
   shower_timer: !input shower_timer
