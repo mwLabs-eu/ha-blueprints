@@ -1,0 +1,377 @@
+blueprint:
+  name: Pluggit Demand Control
+  description: >
+    Demand-driven ventilation control for Pluggit HRV units based on maximum
+    VOC and humidity sensor readings. Features dedicated shower detection with
+    configurable run-off timer, window-open hysteresis to prevent shutdown
+    during brief airing, and fireplace safety override. Window and fireplace
+    sensors are fully optional – leave empty if not used.
+
+
+  domain: automation
+  input:
+    # ── Dashboard & Pluggit Entities ──
+    override_select:
+      name: Dashboard Override Helper (Input Select)
+      description: >
+        An input_select entity with the following options:
+        Auto, Manuell: Aus, Manuell: Stufe 1–4, Kaminmodus.
+      selector:
+        entity:
+          domain: input_select
+    mode_entity:
+      name: Pluggit Operating Mode Select
+      selector:
+        entity:
+          domain: select
+    fan_entity:
+      name: Pluggit Fan Speed Select
+      selector:
+        entity:
+          domain: select
+
+    # ── Sensors ──
+    humidity_sensors:
+      name: Humidity Sensors (General)
+      selector:
+        entity:
+          domain: sensor
+          device_class: humidity
+          multiple: true
+    voc_sensors:
+      name: VOC / IAQ Sensors
+      selector:
+        entity:
+          domain: sensor
+          multiple: true
+
+    # ── Shower Detection ──
+    bathroom_humidity_sensor:
+      name: Bathroom Humidity Sensor
+      selector:
+        entity:
+          domain: sensor
+          device_class: humidity
+    shower_humidity_threshold:
+      name: Shower Start Threshold (%)
+      default: 65
+      selector:
+        number:
+          min: 40
+          max: 85
+          step: 1
+          unit_of_measurement: "%"
+          mode: slider
+    shower_drop_threshold:
+      name: Shower End Threshold (%)
+      default: 55
+      selector:
+        number:
+          min: 40
+          max: 85
+          step: 1
+          unit_of_measurement: "%"
+          mode: slider
+    shower_runoff_minutes:
+      name: Post-Shower Run-Off Time (Minutes)
+      default: 15
+      selector:
+        number:
+          min: 5
+          max: 60
+          step: 5
+          unit_of_measurement: min
+          mode: slider
+    shower_fan_level:
+      name: Shower Mode Fan Level
+      default: 4
+      selector:
+        number:
+          min: 2
+          max: 4
+          step: 1
+          mode: box
+
+    # ── Optional Safety Sensors ──
+    window_sensors:
+      name: Window / Door Sensors (Optional)
+      description: >
+        Binary sensors for windows or doors. Leave empty if not used.
+        The periodic check evaluates these even without a dedicated trigger.
+      default: []
+      selector:
+        entity:
+          filter:
+            - domain: binary_sensor
+              device_class: window
+            - domain: binary_sensor
+              device_class: door
+          multiple: true
+    window_open_delay:
+      name: Window-Open Hysteresis (Minutes)
+      default: 5
+      selector:
+        number:
+          min: 0
+          max: 30
+          step: 1
+          unit_of_measurement: min
+          mode: slider
+    fireplace_sensor:
+      name: Fireplace Sensor (Optional)
+      description: >
+        Binary sensor indicating active fireplace. Leave empty if not used.
+      default: []
+      selector:
+        entity:
+          domain: binary_sensor
+          multiple: true
+
+    # ── Demand Thresholds ──
+    hum_mid:
+      name: Humidity Threshold – Level 2
+      default: 50
+      selector:
+        number:
+          min: 0
+          max: 100
+          mode: box
+    hum_high:
+      name: Humidity Threshold – Level 3
+      default: 60
+      selector:
+        number:
+          min: 0
+          max: 100
+          mode: box
+    hum_max:
+      name: Humidity Threshold – Level 4
+      default: 70
+      selector:
+        number:
+          min: 0
+          max: 100
+          mode: box
+    voc_mid:
+      name: VOC Threshold – Level 2
+      default: 1000
+      selector:
+        number:
+          min: 0
+          max: 20000
+          mode: box
+    voc_high:
+      name: VOC Threshold – Level 3
+      default: 1500
+      selector:
+        number:
+          min: 0
+          max: 20000
+          mode: box
+    voc_max:
+      name: VOC Threshold – Level 4
+      default: 2000
+      selector:
+        number:
+          min: 0
+          max: 20000
+          mode: box
+
+mode: restart
+max_exceeded: silent
+
+# ── Triggers ──
+trigger:
+  - platform: state
+    entity_id: !input humidity_sensors
+    id: sensor_change
+  - platform: state
+    entity_id: !input voc_sensors
+    id: sensor_change
+  - platform: state
+    entity_id: !input bathroom_humidity_sensor
+    id: bathroom_change
+  - platform: state
+    entity_id: !input override_select
+    id: override_change
+  - platform: state
+    entity_id: !input window_sensors
+    id: window_change
+  - platform: state
+    entity_id: !input fireplace_sensor
+    id: safety_change
+
+# ── Variables ──
+variables:
+  override_sel: !input override_select
+  humidity_sensors: !input humidity_sensors
+  voc_sensors: !input voc_sensors
+  window_sensors: !input window_sensors
+  fireplace_sensors: !input fireplace_sensor
+  bathroom_sensor: !input bathroom_humidity_sensor
+  shower_threshold: !input shower_humidity_threshold
+  shower_drop: !input shower_drop_threshold
+  shower_runoff: !input shower_runoff_minutes
+  shower_fan: !input shower_fan_level
+
+  hum_mid: !input hum_mid
+  hum_high: !input hum_high
+  hum_max: !input hum_max
+  voc_mid: !input voc_mid
+  voc_high: !input voc_high
+  voc_max: !input voc_max
+
+  current_bathroom_hum: >
+    {{ states(bathroom_sensor) | float(0) }}
+
+  shower_active: >
+    {{ current_bathroom_hum >= shower_threshold }}
+
+  current_hum: >
+    {{ expand(humidity_sensors)
+       | map(attribute='state')
+       | reject('in', ['unknown', 'unavailable'])
+       | map('float', -1) | max | default(0) }}
+
+  current_voc: >
+    {{ expand(voc_sensors)
+       | map(attribute='state')
+       | reject('in', ['unknown', 'unavailable'])
+       | map('float', -1) | max | default(0) }}
+
+  win_delay: !input window_open_delay
+
+  windows_open_delayed: >
+    {% if window_sensors | length == 0 %}
+      false
+    {% else %}
+      {% set open_long = expand(window_sensors)
+         | selectattr('state', 'eq', 'on')
+         | selectattr('last_changed', 'lt',
+             now() - timedelta(minutes=win_delay)) | list %}
+      {{ open_long | length > 0 }}
+    {% endif %}
+
+  fireplace_active: >
+    {% if fireplace_sensors | length == 0 %}
+      false
+    {% else %}
+      {{ expand(fireplace_sensors)
+         | selectattr('state', 'eq', 'on')
+         | list | length > 0 }}
+    {% endif %}
+
+  target_mode: >
+    {%- set ov = states(override_sel) | default('Auto', true) | string -%}
+    {%- if windows_open_delayed | bool(false) -%}
+      standby
+    {%- elif fireplace_active | bool(false) or 'Kamin' in ov -%}
+      fireplace
+    {%- elif 'Aus' in ov or '0' in ov -%}
+      standby
+    {%- else -%}
+      manual
+    {%- endif -%}
+
+  target_level: >
+    {%- set ov = states(override_sel) | default('Auto', true) | string -%}
+    {%- if current_hum >= hum_max or current_voc >= voc_max -%}
+      {%- set auto_lvl = 4 -%}
+    {%- elif current_hum >= hum_high or current_voc >= voc_high -%}
+      {%- set auto_lvl = 3 -%}
+    {%- elif current_hum >= hum_mid or current_voc >= voc_mid -%}
+      {%- set auto_lvl = 2 -%}
+    {%- else -%}
+      {%- set auto_lvl = 1 -%}
+    {%- endif -%}
+    {%- if windows_open_delayed | bool(false)
+        or fireplace_active | bool(false)
+        or 'Aus' in ov or '0' in ov or 'Kamin' in ov -%}
+      0
+    {%- elif ov in ['unknown', 'unavailable', 'None', '']
+        or 'Auto' in ov -%}
+      {{ auto_lvl }}
+    {%- else -%}
+      {%- set regex_match = ov | regex_findall('[1-4]') -%}
+      {%- if regex_match | length > 0 -%}
+        {{ regex_match[0] | int }}
+      {%- else -%}
+        {{ auto_lvl }}
+      {%- endif -%}
+    {%- endif -%}
+
+# ── Actions ──
+action:
+  - if:
+      - condition: template
+        value_template: "{{ target_mode | trim != 'manual' }}"
+    then:
+      - action: select.select_option
+        target:
+          entity_id: !input mode_entity
+        data:
+          option: "{{ target_mode | trim }}"
+    else:
+      - action: select.select_option
+        target:
+          entity_id: !input mode_entity
+        data:
+          option: "manual"
+          
+      - delay: "00:00:01" 
+
+      - if:
+          - condition: template
+            value_template: "{{ shower_active | bool(false) }}"
+        then:
+          - action: select.select_option
+            target:
+              entity_id: !input fan_entity
+            data:
+              option: "{{ shower_fan | int | string }}"
+
+          - wait_template: >
+              {{ states(bathroom_sensor) | float(0) < shower_drop }}
+            timeout:
+              minutes: 120
+            continue_on_timeout: true
+
+          - delay:
+              minutes: "{{ shower_runoff | int }}"
+
+          - variables:
+              post_shower_hum: >
+                {{ expand(humidity_sensors)
+                   | map(attribute='state')
+                   | reject('in', ['unknown', 'unavailable'])
+                   | map('float', -1) | max | default(0) }}
+              post_shower_voc: >
+                {{ expand(voc_sensors)
+                   | map(attribute='state')
+                   | reject('in', ['unknown', 'unavailable'])
+                   | map('float', -1) | max | default(0) }}
+              post_shower_level: >
+                {%- if post_shower_hum >= hum_max
+                    or post_shower_voc >= voc_max -%}
+                  4
+                {%- elif post_shower_hum >= hum_high
+                    or post_shower_voc >= voc_high -%}
+                  3
+                {%- elif post_shower_hum >= hum_mid
+                    or post_shower_voc >= voc_mid -%}
+                  2
+                {%- else -%}
+                  1
+                {%- endif -%}
+          - action: select.select_option
+            target:
+              entity_id: !input fan_entity
+            data:
+              option: "{{ post_shower_level | string | trim }}"
+
+        else:
+          - action: select.select_option
+            target:
+              entity_id: !input fan_entity
+            data:
+              option: "{{ target_level | string | trim }}"

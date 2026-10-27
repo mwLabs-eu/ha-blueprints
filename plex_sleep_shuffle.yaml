@@ -1,0 +1,130 @@
+blueprint:
+  name: Plex Random Series Sleep Timer
+  description: >
+    Zufällige Serie aus Liste, Plex Shuffle, konfigurierbarer Sleep Timer.
+    Ein Boolean: ON = Start, OFF = Stop.
+  domain: automation
+  input:
+    plex_player:
+      name: Plex Media Player
+      selector:
+        entity:
+          filter:
+            - integration: plex
+              domain: media_player
+
+    bravia_entity:
+      name: Sony Bravia Media Player
+      selector:
+        entity:
+          filter:
+            - domain: media_player
+
+    remote_entity:
+      name: Android TV Remote (Fallback)
+      selector:
+        entity:
+          filter:
+            - domain: remote
+
+    series_list:
+      name: Serien-Titel (komma-separiert)
+      selector:
+        text:
+          multiline: false
+
+    sleep_minutes:
+      name: Sleep Timer (Minuten)
+      default: 60
+      selector:
+        number:
+          min: 5
+          max: 480
+          step: 5
+          unit_of_measurement: min
+          mode: slider
+
+    trigger_boolean:
+      name: Start/Stop Boolean
+      selector:
+        entity:
+          filter:
+            - domain: input_boolean
+
+variables:
+  series_csv: !input series_list
+  series_items: "{{ series_csv.split(',') | map('trim') | list }}"
+  random_series: "{{ series_items | random }}"
+  plex_target: !input plex_player
+  bravia: !input bravia_entity
+  remote_fb: !input remote_entity
+  sleep_min: !input sleep_minutes
+
+trigger:
+  - platform: state
+    entity_id: !input trigger_boolean
+    to: "on"
+    id: start
+
+condition: []
+
+mode: restart
+
+action:
+  # ── TV einschalten + Plex starten ──
+  - action: media_player.turn_on
+    target:
+      entity_id: "{{ bravia }}"
+
+  - delay:
+      seconds: 8
+
+  - action: media_player.play_media
+    target:
+      entity_id: "{{ plex_target }}"
+    data:
+      media_content_id: >-
+        plex://{"library_name": "TV-Shows", "show.title": "{{ random_series }}", "shuffle": 1}
+      media_content_type: episode
+
+  # ── Warten auf OFF oder Timeout ──
+  - wait_for_trigger:
+      - platform: state
+        entity_id: !input trigger_boolean
+        to: "off"
+    timeout:
+      minutes: "{{ sleep_min | int }}"
+    continue_on_timeout: true
+
+  # ── Boolean auf OFF setzen (nach Timer-Ablauf) ──
+  - action: input_boolean.turn_off
+    target:
+      entity_id: !input trigger_boolean
+
+  # ── Shutdown-Sequenz ──
+  - action: media_player.media_stop
+    target:
+      entity_id: "{{ plex_target }}"
+
+  - delay:
+      seconds: 2
+
+  - action: media_player.turn_off
+    target:
+      entity_id: "{{ bravia }}"
+
+  - delay:
+      seconds: 5
+
+  - if:
+      - condition: not
+        conditions:
+          - condition: state
+            entity_id: !input bravia_entity
+            state: "off"
+    then:
+      - action: remote.send_command
+        target:
+          entity_id: "{{ remote_fb }}"
+        data:
+          command: POWER

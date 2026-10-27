@@ -1,0 +1,220 @@
+blueprint:
+  name: Energiemanagement - Dual Noah 2000 PV-Priorisierung & EVCC
+  description: "Steuert die Ausgangsleistung von ZWEI Growatt Noah 2000 basierend auf Netzbezug, Batterie-SOC und EVCC-Status. Integrierte Lastteilung für Nulleinspeisung."
+  domain: automation
+  input:
+    grid_power_sensor:
+      name: Netzleistung Sensor
+      description: "Sensor für den aktuellen Netzbezug (Positiv = Bezug, Negativ = Einspeisung)"
+      selector:
+        entity:
+          domain: sensor
+          device_class: power
+
+    evcc_status_sensor:
+      name: EVCC Status Sensor
+      description: "Sensor oder Binary Sensor, der den aktuellen Ladestatus von EVCC anzeigt."
+      selector:
+        entity:
+          domain: 
+            - sensor
+            - binary_sensor
+
+    evcc_charging_value:
+      name: EVCC Lade-Status Wert
+      description: "Der exakte Textwert des Sensors, wenn das Auto lädt (z.B. 'charging', 'C' oder 'on')."
+      default: "on"
+
+    noah1_soc_sensor:
+      name: Noah 1 - SOC Sensor
+      selector:
+        entity:
+          domain: sensor
+          device_class: battery
+
+    noah2_soc_sensor:
+      name: Noah 2 - SOC Sensor
+      selector:
+        entity:
+          domain: sensor
+          device_class: battery
+
+    noah1_output_limit:
+      name: Noah 1 - Ausgangsleistung Limit (Number Entity)
+      selector:
+        entity:
+          domain: number
+
+    noah2_output_limit:
+      name: Noah 2 - Ausgangsleistung Limit (Number Entity)
+      selector:
+        entity:
+          domain: number
+
+    soc_full_threshold:
+      name: SOC Voll-Schwellenwert
+      description: "Ab diesem SOC-Wert (%) wird der Passthrough-Modus (0W Limit) aktiviert."
+      default: 95
+      selector:
+        number:
+          min: 10
+          max: 100
+          step: 1
+          unit_of_measurement: "%"
+          mode: slider
+
+    soc_protect_threshold:
+      name: SOC Schutz-Schwellenwert bei EV-Ladung
+      description: "Unterhalb dieses SOCs (%) wird die Entladung gestoppt, wenn EVCC aktiv ist."
+      default: 20
+      selector:
+        number:
+          min: 0
+          max: 100
+          step: 1
+          unit_of_measurement: "%"
+          mode: slider
+
+    max_output_power_1:
+      name: Noah 1 - Max. Leistung
+      default: 800
+      selector:
+        number:
+          min: 0
+          max: 1200
+          step: 50
+          unit_of_measurement: "W"
+          mode: slider
+
+    max_output_power_2:
+      name: Noah 2 - Max. Leistung
+      default: 800
+      selector:
+        number:
+          min: 0
+          max: 1200
+          step: 50
+          unit_of_measurement: "W"
+          mode: slider
+
+    grid_hysteresis:
+      name: Netz-Hysterese (Totband)
+      description: "Schwankungsbreite am Stromzähler (W), die ignoriert wird."
+      default: 20
+      selector:
+        number:
+          min: 0
+          max: 100
+          step: 5
+          unit_of_measurement: "W"
+          mode: slider
+
+    cooldown_time:
+      name: Regel-Verzögerung (Totzeit-Kompensation)
+      description: "Wartezeit nach einem API-Call in Sekunden, bis der WR reagiert hat."
+      default: 20
+      selector:
+        number:
+          min: 5
+          max: 120
+          step: 5
+          unit_of_measurement: "s"
+          mode: slider
+
+# --- Root-Ebene der Automatisierung ---
+mode: single
+max_exceeded: silent
+
+trigger:
+  - trigger: state
+    entity_id: !input grid_power_sensor
+  - trigger: state
+    entity_id: !input evcc_status_sensor
+  - trigger: state
+    entity_id: !input noah1_soc_sensor
+  - trigger: state
+    entity_id: !input noah2_soc_sensor
+
+action:
+  - variables:
+      sensor_grid: !input grid_power_sensor
+      sensor_evcc: !input evcc_status_sensor
+      sensor_soc1: !input noah1_soc_sensor
+      sensor_soc2: !input noah2_soc_sensor
+      sensor_limit1: !input noah1_output_limit
+      sensor_limit2: !input noah2_output_limit
+
+      evcc_target_val: !input evcc_charging_value
+      soc_full: !input soc_full_threshold
+      soc_protect: !input soc_protect_threshold
+      max_1: !input max_output_power_1
+      max_2: !input max_output_power_2
+      hysteresis: !input grid_hysteresis
+      
+      netz_leistung: "{{ states(sensor_grid) | float(0) }}"
+      soc_1: "{{ states(sensor_soc1) | float(0) }}"
+      soc_2: "{{ states(sensor_soc2) | float(0) }}"
+      limit_1: "{{ states(sensor_limit1) | float(0) }}"
+      limit_2: "{{ states(sensor_limit2) | float(0) }}"
+      evcc_status: "{{ states(sensor_evcc) }}"
+
+      status_1: >
+        {% if evcc_status == evcc_target_val and soc_1 < soc_protect %} ev_protect
+        {% elif soc_1 >= soc_full %} bypass
+        {% else %} ze
+        {% endif %}
+
+      status_2: >
+        {% if evcc_status == evcc_target_val and soc_2 < soc_protect %} ev_protect
+        {% elif soc_2 >= soc_full %} bypass
+        {% else %} ze
+        {% endif %}
+
+      ze_count: "{{ (1 if status_1 == 'ze' else 0) + (1 if status_2 == 'ze' else 0) }}"
+
+      target_1: >
+        {% if status_1 in ['ev_protect', 'bypass'] %} 0
+        {% else %}
+          {% if (netz_leistung > hysteresis or netz_leistung < (0 - hysteresis)) and ze_count > 0 %}
+            {% set t = limit_1 + (netz_leistung / ze_count) %}
+            {{ max_1 if t > max_1 else (0 if t < 0 else t) }}
+          {% else %}
+            {{ limit_1 }}
+          {% endif %}
+        {% endif %}
+
+      target_2: >
+        {% if status_2 in ['ev_protect', 'bypass'] %} 0
+        {% else %}
+          {% if (netz_leistung > hysteresis or netz_leistung < (0 - hysteresis)) and ze_count > 0 %}
+            {% set t = limit_2 + (netz_leistung / ze_count) %}
+            {{ max_2 if t > max_2 else (0 if t < 0 else t) }}
+          {% else %}
+            {{ limit_2 }}
+          {% endif %}
+        {% endif %}
+
+  - choose:
+      - conditions:
+          - condition: template
+            value_template: "{{ (target_1 - limit_1) | abs > 10 }}"
+        sequence:
+          - action: number.set_value
+            target:
+              entity_id: !input noah1_output_limit
+            data:
+              value: "{{ target_1 | round(0) }}"
+
+  - choose:
+      - conditions:
+          - condition: template
+            value_template: "{{ (target_2 - limit_2) | abs > 10 }}"
+        sequence:
+          - action: number.set_value
+            target:
+              entity_id: !input noah2_output_limit
+            data:
+              value: "{{ target_2 | round(0) }}"
+
+  - delay:
+      seconds: !input cooldown_time
