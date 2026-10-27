@@ -1,218 +1,546 @@
 blueprint:
   name: Pluggit Demand Control
   description: >
-    Demand-driven ventilation control for Pluggit HRV units based on maximum
-    VOC and humidity sensor readings. Features dedicated shower detection with
-    configurable run-off timer, window-open hysteresis to prevent shutdown
-    during brief airing, and fireplace safety override. Window and fireplace
-    sensors are fully optional – leave empty if not used.
+    Demand-driven ventilation control for Pluggit HRV units (e.g. AP310) based on
+    maximum VOC and humidity sensor readings.
 
 
+    **Priority (highest first)**
+
+    1. Window open (after hysteresis, winter only) → standby
+
+    2. Fireplace sensor / "Kaminmodus" → fireplace
+
+    3. "Manuell: Aus" → standby
+
+    4. Shower boost (overrides night quiet mode; optionally manual and "Automatisch (Anlage)")
+
+    5. "Automatisch (Anlage)" → Pluggit's own automatic mode
+
+    6. "Manuell: Stufe 1–4" → fixed level
+
+    7. "Auto" → blueprint demand control (with hysteresis and night cap)
+
+
+    **Features**
+
+    - Step-down hysteresis via timer helper: steps up immediately, steps down only
+      after demand stayed below threshold minus deadband for the configured time.
+
+    - Shower detection by absolute threshold, rise above house average and/or rate
+      of rise (derivative sensor), with drop threshold and run-off timer.
+
+    - Optional outdoor absolute-humidity check: humidity demand is ignored when
+      outdoor air is not drier than indoor air.
+
+    - Optional night quiet mode (maximum level in a time window).
+
+    - Select entities are only written when the value changes (less Modbus traffic).
+
+
+    **Required helpers:** input_select (dashboard), input_boolean (summer mode),
+    2× timer (shower run-off, step-down). Enable "Restore state" on both timers.
   domain: automation
+  homeassistant:
+    min_version: "2024.10.0"
   input:
-    # ── Dashboard & Pluggit Entities ──
-    override_select:
-      name: Dashboard Override Helper (Input Select)
-      description: >
-        An input_select entity with the following options:
-        Auto, Manuell: Aus, Manuell: Stufe 1–4, Kaminmodus.
-      selector:
-        entity:
-          domain: input_select
-    mode_entity:
-      name: Pluggit Operating Mode Select
-      selector:
-        entity:
-          domain: select
-    fan_entity:
-      name: Pluggit Fan Speed Select
-      selector:
-        entity:
-          domain: select
+    devices_section:
+      name: Devices & Helpers
+      icon: mdi:fan
+      input:
+        override_select:
+          name: Dashboard Override Helper (Input Select)
+          description: >
+            An input_select entity with the following options:
+            Auto, Automatisch (Anlage), Manuell: Aus, Manuell: Stufe 1–4, Kaminmodus.
+          selector:
+            entity:
+              domain: input_select
+        mode_entity:
+          name: Pluggit Operating Mode Select
+          selector:
+            entity:
+              domain: select
+        fan_entity:
+          name: Pluggit Fan Speed Select
+          selector:
+            entity:
+              domain: select
+        device_auto_label:
+          name: Dashboard Option for Pluggit Automatic Mode
+          description: >
+            The input_select option that hands control to the Pluggit's own
+            automatic mode.
+          default: Automatisch (Anlage)
+          selector:
+            text:
+        device_auto_option:
+          name: Pluggit Mode Option for Automatic Mode
+          description: >
+            The option of the Pluggit mode select that activates the unit's automatic
+            mode. Check the exact name under Developer Tools → States → your mode
+            select → attribute "options".
+          default: automatic
+          selector:
+            text:
+        summer_switch:
+          name: Summer Mode Switch (Input Boolean)
+          description: >
+            On = summer: open windows are ignored and the ventilation keeps running.
+            Off = winter: open windows put the unit into standby after the
+            window-open hysteresis (prevents heat loss).
+          selector:
+            entity:
+              domain: input_boolean
+        stepdown_timer:
+          name: Step-Down Hysteresis Timer Helper
+          description: A timer helper (Settings → Helpers → Timer, enable "Restore state").
+          selector:
+            entity:
+              domain: timer
+        shower_timer:
+          name: Shower Run-Off Timer Helper
+          description: A timer helper (Settings → Helpers → Timer, enable "Restore state").
+          selector:
+            entity:
+              domain: timer
 
-    # ── Sensors ──
-    humidity_sensors:
-      name: Humidity Sensors (General)
-      selector:
-        entity:
-          domain: sensor
-          device_class: humidity
-          multiple: true
-    voc_sensors:
-      name: VOC / IAQ Sensors
-      selector:
-        entity:
-          domain: sensor
-          multiple: true
+    sensors_section:
+      name: Air Quality Sensors
+      icon: mdi:water-percent
+      input:
+        humidity_sensors:
+          name: Humidity Sensors (General)
+          selector:
+            entity:
+              domain: sensor
+              device_class: humidity
+              multiple: true
+        voc_sensors:
+          name: VOC / IAQ Sensors
+          selector:
+            entity:
+              domain: sensor
+              multiple: true
 
-    # ── Shower Detection ──
-    bathroom_humidity_sensor:
-      name: Bathroom Humidity Sensor
-      selector:
-        entity:
-          domain: sensor
-          device_class: humidity
-    shower_humidity_threshold:
-      name: Shower Start Threshold (%)
-      default: 65
-      selector:
-        number:
-          min: 40
-          max: 85
-          step: 1
-          unit_of_measurement: "%"
-          mode: slider
-    shower_drop_threshold:
-      name: Shower End Threshold (%)
-      default: 55
-      selector:
-        number:
-          min: 40
-          max: 85
-          step: 1
-          unit_of_measurement: "%"
-          mode: slider
-    shower_runoff_minutes:
-      name: Post-Shower Run-Off Time (Minutes)
-      default: 15
-      selector:
-        number:
-          min: 5
-          max: 60
-          step: 5
-          unit_of_measurement: min
-          mode: slider
-    shower_fan_level:
-      name: Shower Mode Fan Level
-      default: 4
-      selector:
-        number:
-          min: 2
-          max: 4
-          step: 1
-          mode: box
+    thresholds_section:
+      name: Demand Thresholds
+      icon: mdi:stairs
+      input:
+        hum_mid:
+          name: Humidity Threshold – Level 2
+          default: 50
+          selector:
+            number:
+              min: 0
+              max: 100
+              unit_of_measurement: "%"
+              mode: box
+        hum_high:
+          name: Humidity Threshold – Level 3
+          default: 60
+          selector:
+            number:
+              min: 0
+              max: 100
+              unit_of_measurement: "%"
+              mode: box
+        hum_max:
+          name: Humidity Threshold – Level 4
+          default: 70
+          selector:
+            number:
+              min: 0
+              max: 100
+              unit_of_measurement: "%"
+              mode: box
+        voc_mid:
+          name: VOC Threshold – Level 2
+          default: 1000
+          selector:
+            number:
+              min: 0
+              max: 20000
+              mode: box
+        voc_high:
+          name: VOC Threshold – Level 3
+          default: 1500
+          selector:
+            number:
+              min: 0
+              max: 20000
+              mode: box
+        voc_max:
+          name: VOC Threshold – Level 4
+          default: 2000
+          selector:
+            number:
+              min: 0
+              max: 20000
+              mode: box
 
-    # ── Optional Safety Sensors ──
-    window_sensors:
-      name: Window / Door Sensors (Optional)
-      description: >
-        Binary sensors for windows or doors. Leave empty if not used.
-        The periodic check evaluates these even without a dedicated trigger.
-      default: []
-      selector:
-        entity:
-          filter:
-            - domain: binary_sensor
-              device_class: window
-            - domain: binary_sensor
-              device_class: door
-          multiple: true
-    window_open_delay:
-      name: Window-Open Hysteresis (Minutes)
-      default: 5
-      selector:
-        number:
-          min: 0
-          max: 30
-          step: 1
-          unit_of_measurement: min
-          mode: slider
-    fireplace_sensor:
-      name: Fireplace Sensor (Optional)
-      description: >
-        Binary sensor indicating active fireplace. Leave empty if not used.
-      default: []
-      selector:
-        entity:
-          domain: binary_sensor
-          multiple: true
+    hysteresis_section:
+      name: Level Hysteresis
+      icon: mdi:timer-sand
+      input:
+        step_down_delay:
+          name: Step-Down Hysteresis (Minutes)
+          description: >
+            Demand must stay below the current level's threshold (minus deadband)
+            for this long before the fan steps down one level. Stepping up always
+            happens immediately. 0 = step down immediately.
+          default: 10
+          selector:
+            number:
+              min: 0
+              max: 60
+              step: 1
+              unit_of_measurement: min
+              mode: slider
+        hum_deadband:
+          name: Humidity Deadband (%)
+          description: >
+            To step down, humidity must fall this far below the threshold that caused
+            the current level. 0 = disabled.
+          default: 3
+          selector:
+            number:
+              min: 0
+              max: 15
+              step: 0.5
+              unit_of_measurement: "%"
+              mode: slider
+        voc_deadband:
+          name: VOC Deadband
+          description: >
+            To step down, VOC must fall this far below the threshold that caused the
+            current level. 0 = disabled.
+          default: 100
+          selector:
+            number:
+              min: 0
+              max: 2000
+              step: 10
+              mode: box
 
-    # ── Demand Thresholds ──
-    hum_mid:
-      name: Humidity Threshold – Level 2
-      default: 50
-      selector:
-        number:
-          min: 0
-          max: 100
-          mode: box
-    hum_high:
-      name: Humidity Threshold – Level 3
-      default: 60
-      selector:
-        number:
-          min: 0
-          max: 100
-          mode: box
-    hum_max:
-      name: Humidity Threshold – Level 4
-      default: 70
-      selector:
-        number:
-          min: 0
-          max: 100
-          mode: box
-    voc_mid:
-      name: VOC Threshold – Level 2
-      default: 1000
-      selector:
-        number:
-          min: 0
-          max: 20000
-          mode: box
-    voc_high:
-      name: VOC Threshold – Level 3
-      default: 1500
-      selector:
-        number:
-          min: 0
-          max: 20000
-          mode: box
-    voc_max:
-      name: VOC Threshold – Level 4
-      default: 2000
-      selector:
-        number:
-          min: 0
-          max: 20000
-          mode: box
+    shower_section:
+      name: Shower Detection
+      icon: mdi:shower-head
+      input:
+        bathroom_humidity_sensor:
+          name: Bathroom Humidity Sensor
+          selector:
+            entity:
+              domain: sensor
+              device_class: humidity
+        shower_humidity_threshold:
+          name: Shower Start – Absolute Threshold (%)
+          default: 65
+          selector:
+            number:
+              min: 40
+              max: 100
+              step: 1
+              unit_of_measurement: "%"
+              mode: slider
+        shower_rise_delta:
+          name: Shower Start – Rise Above House Average (%)
+          description: >
+            Bathroom humidity is this many % above the average of the general
+            humidity sensors (bathroom excluded). Works better in humid summers than
+            a fixed threshold. 0 = disabled.
+          default: 0
+          selector:
+            number:
+              min: 0
+              max: 40
+              step: 1
+              unit_of_measurement: "%"
+              mode: slider
+        bathroom_derivative_sensor:
+          name: Shower Start – Rate of Rise Sensor (Optional)
+          description: >
+            A Derivative helper on the bathroom humidity sensor (Settings → Helpers
+            → Derivative sensor; time unit: minutes, time window: 2–3 min). Detects
+            a shower within the first minutes, before the absolute threshold is
+            reached. Leave empty if not used.
+          default: ""
+          selector:
+            entity:
+              domain: sensor
+        shower_rate_threshold:
+          name: Shower Start – Rate of Rise (%/min)
+          default: 1
+          selector:
+            number:
+              min: 0.2
+              max: 10
+              step: 0.1
+              unit_of_measurement: "%/min"
+              mode: slider
+        shower_drop_threshold:
+          name: Shower End Threshold (%)
+          description: >
+            Boost holds until bathroom humidity falls below this value, then the
+            run-off time starts.
+          default: 55
+          selector:
+            number:
+              min: 30
+              max: 85
+              step: 1
+              unit_of_measurement: "%"
+              mode: slider
+        shower_runoff_minutes:
+          name: Post-Shower Run-Off Time (Minutes)
+          default: 15
+          selector:
+            number:
+              min: 1
+              max: 60
+              step: 1
+              unit_of_measurement: min
+              mode: slider
+        shower_fan_level:
+          name: Shower Mode Fan Level
+          default: 4
+          selector:
+            number:
+              min: 2
+              max: 4
+              step: 1
+              mode: box
+        shower_in_manual:
+          name: Shower Boost Overrides Manual Levels
+          description: >
+            Shower boost also applies when the dashboard is set to "Manuell: Stufe 1–4".
+          default: true
+          selector:
+            boolean:
+        shower_in_device_auto:
+          name: Shower Boost Overrides Pluggit Automatic Mode
+          description: >
+            Shower boost also applies when the dashboard is set to "Automatisch (Anlage)"
+            (switches to manual during the boost, back to automatic afterwards).
+          default: true
+          selector:
+            boolean:
 
-mode: restart
+    safety_section:
+      name: Windows & Fireplace (Optional)
+      icon: mdi:window-open-variant
+      collapsed: true
+      input:
+        window_sensors:
+          name: Window / Door Sensors (Optional)
+          description: >
+            Binary sensors for windows or doors. Only evaluated in winter (summer
+            mode switch off). Leave empty if not used.
+          default: []
+          selector:
+            entity:
+              filter:
+                - domain: binary_sensor
+                  device_class: window
+                - domain: binary_sensor
+                  device_class: door
+                - domain: binary_sensor
+                  device_class: opening
+              multiple: true
+        window_open_delay:
+          name: Window-Open Hysteresis (Minutes)
+          default: 5
+          selector:
+            number:
+              min: 0
+              max: 30
+              step: 1
+              unit_of_measurement: min
+              mode: slider
+        fireplace_sensor:
+          name: Fireplace Sensor (Optional)
+          description: Binary sensor indicating active fireplace. Leave empty if not used.
+          default: []
+          selector:
+            entity:
+              domain: binary_sensor
+              multiple: true
+
+    outdoor_section:
+      name: Outdoor Humidity Check (Optional)
+      icon: mdi:home-thermometer-outline
+      collapsed: true
+      input:
+        indoor_temp_sensors:
+          name: Indoor Temperature Sensors
+          description: Averaged to compute indoor absolute humidity.
+          default: []
+          selector:
+            entity:
+              domain: sensor
+              device_class: temperature
+              multiple: true
+        outdoor_temp_sensor:
+          name: Outdoor Temperature Sensor
+          default: ""
+          selector:
+            entity:
+              domain: sensor
+              device_class: temperature
+        outdoor_humidity_sensor:
+          name: Outdoor Humidity Sensor
+          default: ""
+          selector:
+            entity:
+              domain: sensor
+              device_class: humidity
+        abs_hum_margin:
+          name: Required Drying Margin (g/m³)
+          description: >
+            Humidity demand only counts if outdoor absolute humidity is at least this
+            much lower than indoor. VOC demand and shower boost are not affected.
+          default: 1
+          selector:
+            number:
+              min: 0
+              max: 5
+              step: 0.1
+              unit_of_measurement: g/m³
+              mode: slider
+
+    night_section:
+      name: Night Quiet Mode (Optional)
+      icon: mdi:weather-night
+      collapsed: true
+      input:
+        night_max_level:
+          name: Night Maximum Fan Level
+          description: >
+            Maximum level in "Auto" mode during the night window. Shower boost always
+            has priority and is not limited. 4 = disabled.
+          default: 4
+          selector:
+            number:
+              min: 1
+              max: 4
+              step: 1
+              mode: box
+        night_start:
+          name: Night Start
+          default: "22:00:00"
+          selector:
+            time:
+        night_end:
+          name: Night End
+          default: "06:00:00"
+          selector:
+            time:
+
+# Queued instead of restart: no long waits anymore, and every timer.finished
+# event must be processed.
+mode: queued
+max: 10
 max_exceeded: silent
 
 # ── Triggers ──
-trigger:
-  - platform: state
+triggers:
+  - trigger: state
     entity_id: !input humidity_sensors
+    to: ~
     id: sensor_change
-  - platform: state
+  - trigger: state
     entity_id: !input voc_sensors
+    to: ~
     id: sensor_change
-  - platform: state
+  - trigger: state
     entity_id: !input bathroom_humidity_sensor
+    to: ~
     id: bathroom_change
-  - platform: state
+  - trigger: state
+    entity_id: !input bathroom_derivative_sensor
+    to: ~
+    id: bathroom_change
+  - trigger: state
     entity_id: !input override_select
+    to: ~
     id: override_change
-  - platform: state
+  - trigger: state
     entity_id: !input window_sensors
+    to: ~
     id: window_change
-  - platform: state
+  # Fires once the window hysteresis has elapsed
+  - trigger: state
+    entity_id: !input window_sensors
+    to: "on"
+    for:
+      minutes: !input window_open_delay
+    id: window_delayed
+  - trigger: state
     entity_id: !input fireplace_sensor
+    to: ~
     id: safety_change
+  - trigger: state
+    entity_id: !input summer_switch
+    to: ~
+    id: season_change
+  - trigger: event
+    event_type: timer.finished
+    event_data:
+      entity_id: !input stepdown_timer
+    id: stepdown_finished
+  - trigger: event
+    event_type: timer.finished
+    event_data:
+      entity_id: !input shower_timer
+    id: shower_finished
+  - trigger: time
+    at: !input night_start
+    id: night_change
+  - trigger: time
+    at: !input night_end
+    id: night_change
+  - trigger: time_pattern
+    minutes: "/5"
+    id: periodic
+  - trigger: homeassistant
+    event: start
+    id: ha_start
 
 # ── Variables ──
 variables:
   override_sel: !input override_select
+  mode_ent: !input mode_entity
+  fan_ent: !input fan_entity
+  device_auto_label: !input device_auto_label
+  device_auto_option: !input device_auto_option
+  summer_ent: !input summer_switch
+  sd_timer: !input stepdown_timer
+  shower_timer: !input shower_timer
   humidity_sensors: !input humidity_sensors
   voc_sensors: !input voc_sensors
   window_sensors: !input window_sensors
   fireplace_sensors: !input fireplace_sensor
   bathroom_sensor: !input bathroom_humidity_sensor
+  bath_deriv: !input bathroom_derivative_sensor
+  shower_rate: !input shower_rate_threshold
   shower_threshold: !input shower_humidity_threshold
+  shower_delta: !input shower_rise_delta
   shower_drop: !input shower_drop_threshold
   shower_runoff: !input shower_runoff_minutes
   shower_fan: !input shower_fan_level
+  shower_in_manual: !input shower_in_manual
+  shower_in_device_auto: !input shower_in_device_auto
+  win_delay: !input window_open_delay
+  step_down_delay: !input step_down_delay
+  hum_db: !input hum_deadband
+  voc_db: !input voc_deadband
+  indoor_temps: !input indoor_temp_sensors
+  outdoor_temp: !input outdoor_temp_sensor
+  outdoor_hum: !input outdoor_humidity_sensor
+  ah_margin: !input abs_hum_margin
+  night_max: !input night_max_level
+  night_start: !input night_start
+  night_end: !input night_end
 
   hum_mid: !input hum_mid
   hum_high: !input hum_high
@@ -221,157 +549,277 @@ variables:
   voc_high: !input voc_high
   voc_max: !input voc_max
 
-  current_bathroom_hum: >
-    {{ states(bathroom_sensor) | float(0) }}
+  trig_id: >
+    {{ trigger.id if trigger is defined and trigger.id is defined else '' }}
 
-  shower_active: >
-    {{ current_bathroom_hum >= shower_threshold }}
+  # ── Dashboard override ──
+  ov: >
+    {{ states(override_sel) | string }}
+  ov_device_auto: >
+    {{ ov == device_auto_label }}
+  ov_off: >
+    {{ not ov_device_auto and ('Aus' in ov or '0' in ov) }}
+  ov_fireplace: >
+    {{ 'Kamin' in ov }}
+  ov_manual_level: >
+    {% set m = ov | regex_findall('[1-4]') %}
+    {{ m[0] | int if not ov_device_auto and not ov_off and m | length > 0 else 0 }}
+  # Blueprint demand control ("Auto", or helper unavailable as fallback)
+  ov_auto: >
+    {{ not ov_device_auto and not ov_off and not ov_fireplace
+       and ov_manual_level | int(0) == 0 }}
 
+  # ── Sensor aggregation ──
   current_hum: >
-    {{ expand(humidity_sensors)
-       | map(attribute='state')
-       | reject('in', ['unknown', 'unavailable'])
-       | map('float', -1) | max | default(0) }}
-
+    {% set vals = expand(humidity_sensors) | map(attribute='state')
+       | select('is_number') | map('float') | list %}
+    {{ vals | max if vals | length > 0 else 0 }}
   current_voc: >
-    {{ expand(voc_sensors)
-       | map(attribute='state')
-       | reject('in', ['unknown', 'unavailable'])
-       | map('float', -1) | max | default(0) }}
+    {% set vals = expand(voc_sensors) | map(attribute='state')
+       | select('is_number') | map('float') | list %}
+    {{ vals | max if vals | length > 0 else 0 }}
 
-  win_delay: !input window_open_delay
+  # ── Outdoor absolute humidity check ──
+  humidity_useful: >
+    {% set ti = expand(indoor_temps) | map(attribute='state')
+       | select('is_number') | map('float') | list %}
+    {% if outdoor_temp | length == 0 or outdoor_hum | length == 0
+          or ti | length == 0
+          or not is_number(states(outdoor_temp))
+          or not is_number(states(outdoor_hum)) %}
+      true
+    {% else %}
+      {% set t_in = ti | average %}
+      {% set t_out = states(outdoor_temp) | float %}
+      {% set rh_out = states(outdoor_hum) | float %}
+      {% set ah_in = 6.112 * e ** (17.67 * t_in / (t_in + 243.5))
+                     * current_hum * 2.1674 / (273.15 + t_in) %}
+      {% set ah_out = 6.112 * e ** (17.67 * t_out / (t_out + 243.5))
+                      * rh_out * 2.1674 / (273.15 + t_out) %}
+      {{ ah_out <= ah_in - ah_margin }}
+    {% endif %}
+  hum_eff: >
+    {{ current_hum if humidity_useful | bool(true) else 0 }}
 
+  # ── Safety ──
+  summer_mode: >
+    {{ is_state(summer_ent, 'on') }}
+  # Winter only: in summer open windows are fine
   windows_open_delayed: >
-    {% if window_sensors | length == 0 %}
+    {% if summer_mode or window_sensors | length == 0 %}
       false
     {% else %}
-      {% set open_long = expand(window_sensors)
+      {{ expand(window_sensors)
          | selectattr('state', 'eq', 'on')
-         | selectattr('last_changed', 'lt',
-             now() - timedelta(minutes=win_delay)) | list %}
-      {{ open_long | length > 0 }}
+         | selectattr('last_changed', 'le',
+             now() - timedelta(minutes=win_delay | float(0)))
+         | list | length > 0 }}
     {% endif %}
-
   fireplace_active: >
     {% if fireplace_sensors | length == 0 %}
       false
     {% else %}
-      {{ expand(fireplace_sensors)
-         | selectattr('state', 'eq', 'on')
+      {{ expand(fireplace_sensors) | selectattr('state', 'eq', 'on')
          | list | length > 0 }}
     {% endif %}
 
+  # ── Night window ──
+  in_night: >
+    {% if night_max | int(4) >= 4 %}
+      false
+    {% else %}
+      {% set s = today_at(night_start) %}
+      {% set e_ = today_at(night_end) %}
+      {% if s <= e_ %}
+        {{ s <= now() < e_ }}
+      {% else %}
+        {{ now() >= s or now() < e_ }}
+      {% endif %}
+    {% endif %}
+
+  # ── Shower state machine (timer = memory between runs) ──
+  bath_hum: >
+    {{ states(bathroom_sensor) | float(-1) }}
+  shower_start_now: >
+    {% set others = expand(humidity_sensors)
+       | rejectattr('entity_id', 'eq', bathroom_sensor)
+       | map(attribute='state') | select('is_number') | map('float') | list %}
+    {% set by_abs = bath_hum >= shower_threshold %}
+    {% set by_delta = shower_delta | float(0) > 0 and others | length > 0
+       and bath_hum - (others | average) >= shower_delta | float(0) %}
+    {% set by_rate = bath_deriv | length > 0
+       and states(bath_deriv) | float(0) >= shower_rate | float(99) %}
+    {{ bath_hum >= 0 and (by_abs or by_delta or by_rate) }}
+  shower_timer_running: >
+    {{ states(shower_timer) in ['active', 'paused'] }}
+  # boost  = shower running or humidity still above end threshold (timer restarts)
+  # runoff = humidity below end threshold, timer counting down
+  # off    = no shower
+  shower_phase: >
+    {% if shower_start_now %}
+      boost
+    {% elif shower_timer_running and bath_hum >= shower_drop %}
+      boost
+    {% elif shower_timer_running %}
+      runoff
+    {% else %}
+      off
+    {% endif %}
+  shower_applies: >
+    {{ shower_phase | trim != 'off' and (
+         ov_auto
+         or (ov_manual_level | int(0) > 0 and shower_in_manual)
+         or (ov_device_auto and shower_in_device_auto)) }}
+
+  # ── Target mode ──
   target_mode: >
-    {%- set ov = states(override_sel) | default('Auto', true) | string -%}
     {%- if windows_open_delayed | bool(false) -%}
       standby
-    {%- elif fireplace_active | bool(false) or 'Kamin' in ov -%}
+    {%- elif fireplace_active | bool(false) or ov_fireplace -%}
       fireplace
-    {%- elif 'Aus' in ov or '0' in ov -%}
+    {%- elif ov_off -%}
       standby
+    {%- elif ov_device_auto and not shower_applies -%}
+      {{ device_auto_option }}
     {%- else -%}
       manual
     {%- endif -%}
 
-  target_level: >
-    {%- set ov = states(override_sel) | default('Auto', true) | string -%}
-    {%- if current_hum >= hum_max or current_voc >= voc_max -%}
-      {%- set auto_lvl = 4 -%}
-    {%- elif current_hum >= hum_high or current_voc >= voc_high -%}
-      {%- set auto_lvl = 3 -%}
-    {%- elif current_hum >= hum_mid or current_voc >= voc_mid -%}
-      {%- set auto_lvl = 2 -%}
-    {%- else -%}
-      {%- set auto_lvl = 1 -%}
+  # ── Blueprint demand levels ──
+  raw_level: >
+    {%- set h = hum_eff | float(0) -%}
+    {%- set v = current_voc | float(0) -%}
+    {%- if h >= hum_max or v >= voc_max -%} 4
+    {%- elif h >= hum_high or v >= voc_high -%} 3
+    {%- elif h >= hum_mid or v >= voc_mid -%} 2
+    {%- else -%} 1
     {%- endif -%}
-    {%- if windows_open_delayed | bool(false)
-        or fireplace_active | bool(false)
-        or 'Aus' in ov or '0' in ov or 'Kamin' in ov -%}
-      0
-    {%- elif ov in ['unknown', 'unavailable', 'None', '']
-        or 'Auto' in ov -%}
-      {{ auto_lvl }}
+  # Same calculation with deadband applied → level we may step down to
+  hold_level: >
+    {%- set h = hum_eff | float(0) + hum_db | float(0) -%}
+    {%- set v = current_voc | float(0) + voc_db | float(0) -%}
+    {%- if h >= hum_max or v >= voc_max -%} 4
+    {%- elif h >= hum_high or v >= voc_high -%} 3
+    {%- elif h >= hum_mid or v >= voc_mid -%} 2
+    {%- else -%} 1
+    {%- endif -%}
+  current_fan: >
+    {{ states(fan_ent) | int(-1) if states(mode_ent) == 'manual' else -1 }}
+  # Blueprint demand control is in charge of the fan right now
+  bp_auto_active: >
+    {{ target_mode | trim == 'manual' and ov_auto and not shower_applies }}
+  # Step-down allowed now: hysteresis elapsed, or shower run-off just ended
+  stepdown_now: >
+    {{ step_down_delay | float(0) == 0
+       or trig_id in ['stepdown_finished', 'shower_finished'] }}
+  auto_level: >
+    {%- set raw = raw_level | int(1) -%}
+    {%- set hold = hold_level | int(1) -%}
+    {%- set cur = current_fan | int(-1) -%}
+    {%- if cur < 1 or raw >= cur -%}
+      {%- set lvl = raw -%}
+    {%- elif hold >= cur -%}
+      {%- set lvl = cur -%}
+    {%- elif stepdown_now -%}
+      {%- set lvl = hold -%}
     {%- else -%}
-      {%- set regex_match = ov | regex_findall('[1-4]') -%}
-      {%- if regex_match | length > 0 -%}
-        {{ regex_match[0] | int }}
-      {%- else -%}
-        {{ auto_lvl }}
-      {%- endif -%}
+      {%- set lvl = cur -%}
+    {%- endif -%}
+    {{ [lvl, night_max | int(4)] | min if in_night | bool(false) else lvl }}
+  # start  = demand is low, begin counting the hysteresis
+  # cancel = demand is back up (or blueprint not in control)
+  stepdown_action: >
+    {%- set raw = raw_level | int(1) -%}
+    {%- set hold = hold_level | int(1) -%}
+    {%- set cur = current_fan | int(-1) -%}
+    {%- set running = states(sd_timer) in ['active', 'paused'] -%}
+    {%- if not bp_auto_active or cur < 1 or raw >= cur or hold >= cur
+          or stepdown_now -%}
+      {{ 'cancel' if running else 'none' }}
+    {%- else -%}
+      {{ 'none' if running else 'start' }}
+    {%- endif -%}
+
+  # ── Final fan level (only used in manual mode) ──
+  target_level: >
+    {%- if ov_manual_level | int(0) > 0 -%}
+      {%- set base = ov_manual_level | int -%}
+    {%- elif ov_device_auto -%}
+      {%- set base = 1 -%}
+    {%- else -%}
+      {%- set base = auto_level | int(1) -%}
+    {%- endif -%}
+    {%- if shower_applies -%}
+      {{ [base, shower_fan | int(4)] | max }}
+    {%- else -%}
+      {{ base }}
     {%- endif -%}
 
 # ── Actions ──
-action:
+actions:
+  # Keep the shower run-off timer alive while the shower is ongoing
+  - if:
+      - condition: template
+        value_template: "{{ shower_phase | trim == 'boost' }}"
+    then:
+      - action: timer.start
+        target:
+          entity_id: "{{ shower_timer }}"
+        data:
+          duration:
+            minutes: "{{ shower_runoff | int(15) }}"
+
+  # Step-down hysteresis timer
+  - choose:
+      - conditions:
+          - condition: template
+            value_template: "{{ stepdown_action | trim == 'start' }}"
+        sequence:
+          - action: timer.start
+            target:
+              entity_id: "{{ sd_timer }}"
+            data:
+              duration:
+                minutes: "{{ step_down_delay | int(10) }}"
+      - conditions:
+          - condition: template
+            value_template: "{{ stepdown_action | trim == 'cancel' }}"
+        sequence:
+          - action: timer.cancel
+            target:
+              entity_id: "{{ sd_timer }}"
+
+  # Operating mode and fan level
   - if:
       - condition: template
         value_template: "{{ target_mode | trim != 'manual' }}"
     then:
-      - action: select.select_option
-        target:
-          entity_id: !input mode_entity
-        data:
-          option: "{{ target_mode | trim }}"
-    else:
-      - action: select.select_option
-        target:
-          entity_id: !input mode_entity
-        data:
-          option: "manual"
-          
-      - delay: "00:00:01" 
-
       - if:
           - condition: template
-            value_template: "{{ shower_active | bool(false) }}"
+            value_template: "{{ states(mode_ent) != target_mode | trim }}"
         then:
           - action: select.select_option
             target:
-              entity_id: !input fan_entity
+              entity_id: "{{ mode_ent }}"
             data:
-              option: "{{ shower_fan | int | string }}"
-
-          - wait_template: >
-              {{ states(bathroom_sensor) | float(0) < shower_drop }}
-            timeout:
-              minutes: 120
-            continue_on_timeout: true
-
-          - delay:
-              minutes: "{{ shower_runoff | int }}"
-
-          - variables:
-              post_shower_hum: >
-                {{ expand(humidity_sensors)
-                   | map(attribute='state')
-                   | reject('in', ['unknown', 'unavailable'])
-                   | map('float', -1) | max | default(0) }}
-              post_shower_voc: >
-                {{ expand(voc_sensors)
-                   | map(attribute='state')
-                   | reject('in', ['unknown', 'unavailable'])
-                   | map('float', -1) | max | default(0) }}
-              post_shower_level: >
-                {%- if post_shower_hum >= hum_max
-                    or post_shower_voc >= voc_max -%}
-                  4
-                {%- elif post_shower_hum >= hum_high
-                    or post_shower_voc >= voc_high -%}
-                  3
-                {%- elif post_shower_hum >= hum_mid
-                    or post_shower_voc >= voc_mid -%}
-                  2
-                {%- else -%}
-                  1
-                {%- endif -%}
+              option: "{{ target_mode | trim }}"
+    else:
+      - if:
+          - condition: template
+            value_template: "{{ states(mode_ent) != 'manual' }}"
+        then:
           - action: select.select_option
             target:
-              entity_id: !input fan_entity
+              entity_id: "{{ mode_ent }}"
             data:
-              option: "{{ post_shower_level | string | trim }}"
-
-        else:
+              option: "manual"
+          - delay: "00:00:02"
+      - if:
+          - condition: template
+            value_template: "{{ states(fan_ent) != target_level | string | trim }}"
+        then:
           - action: select.select_option
             target:
-              entity_id: !input fan_entity
+              entity_id: "{{ fan_ent }}"
             data:
               option: "{{ target_level | string | trim }}"
