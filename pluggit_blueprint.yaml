@@ -49,69 +49,67 @@ blueprint:
   homeassistant:
     min_version: "2024.10.0"
   input:
-    devices_section:
-      name: Devices & Helpers
-      icon: mdi:fan
-      collapsed: true
-      input:
-        override_select:
-          name: Dashboard Override Helper (Input Select)
-          description: >
-            An input_select entity with the following options:
-            Auto, Automatisch (Anlage), Manuell: Aus, Manuell: Stufe 1–4, Kaminmodus.
-          selector:
-            entity:
-              domain: input_select
-        mode_entity:
-          name: Pluggit Operating Mode Select
-          selector:
-            entity:
-              domain: select
-        fan_entity:
-          name: Pluggit Fan Speed Select
-          selector:
-            entity:
-              domain: select
-        summer_switch:
-          name: Summer Mode Switch (Input Boolean)
-          description: >
-            On = summer: open windows are ignored and the ventilation keeps running.
-            Off = winter: open windows put the unit into standby after the
-            window-open hysteresis (prevents heat loss).
-          selector:
-            entity:
-              domain: input_boolean
-        stepdown_timer:
-          name: Step-Down Hysteresis Timer Helper
-          description: A timer helper (Settings → Helpers → Timer, enable "Restore state").
-          selector:
-            entity:
-              domain: timer
-        shower_timer:
-          name: Shower Run-Off Timer Helper
-          description: A timer helper (Settings → Helpers → Timer, enable "Restore state").
-          selector:
-            entity:
-              domain: timer
+    # ── Required entities (outside sections: HA cannot collapse sections
+    #    that contain inputs without a default) ──
+    override_select:
+      name: Dashboard Override Helper (Input Select)
+      description: >
+        An input_select entity with the following options:
+        Auto, Automatisch (Anlage), Manuell: Aus, Manuell: Stufe 1–4, Kaminmodus.
+      selector:
+        entity:
+          domain: input_select
+    mode_entity:
+      name: Pluggit Operating Mode Select
+      selector:
+        entity:
+          domain: select
+    fan_entity:
+      name: Pluggit Fan Speed Select
+      selector:
+        entity:
+          domain: select
+    summer_switch:
+      name: Summer Mode Switch (Input Boolean)
+      description: >
+        On = summer: open windows are ignored and the ventilation keeps running.
+        Off = winter: open windows put the unit into standby after the
+        window-open hysteresis (prevents heat loss).
+      selector:
+        entity:
+          domain: input_boolean
+    stepdown_timer:
+      name: Step-Down Hysteresis Timer Helper
+      description: A timer helper (Settings → Helpers → Timer, enable "Restore state").
+      selector:
+        entity:
+          domain: timer
+    shower_timer:
+      name: Shower Run-Off Timer Helper
+      description: A timer helper (Settings → Helpers → Timer, enable "Restore state").
+      selector:
+        entity:
+          domain: timer
 
-    sensors_section:
-      name: Air Quality Sensors
-      icon: mdi:water-percent
-      collapsed: true
-      input:
-        humidity_sensors:
-          name: Humidity Sensors (General)
-          selector:
-            entity:
-              domain: sensor
-              device_class: humidity
-              multiple: true
-        voc_sensors:
-          name: VOC / IAQ Sensors
-          selector:
-            entity:
-              domain: sensor
-              multiple: true
+    humidity_sensors:
+      name: Humidity Sensors (General)
+      selector:
+        entity:
+          domain: sensor
+          device_class: humidity
+          multiple: true
+    voc_sensors:
+      name: VOC / IAQ Sensors
+      selector:
+        entity:
+          domain: sensor
+          multiple: true
+    bathroom_humidity_sensor:
+      name: Bathroom Humidity Sensor
+      selector:
+        entity:
+          domain: sensor
+          device_class: humidity
 
     thresholds_section:
       name: Demand Thresholds
@@ -221,12 +219,6 @@ blueprint:
       icon: mdi:shower-head
       collapsed: true
       input:
-        bathroom_humidity_sensor:
-          name: Bathroom Humidity Sensor
-          selector:
-            entity:
-              domain: sensor
-              device_class: humidity
         shower_humidity_threshold:
           name: Shower Start – Absolute Threshold (%)
           default: 65
@@ -258,10 +250,11 @@ blueprint:
             → Derivative sensor; time unit: minutes, time window: 2–3 min). Detects
             a shower within the first minutes, before the absolute threshold is
             reached. Leave empty if not used.
-          default: ""
+          default: []
           selector:
             entity:
               domain: sensor
+              multiple: true
         shower_rate_threshold:
           name: Shower Start – Rate of Rise (%/min)
           default: 1
@@ -592,10 +585,9 @@ variables:
 
   # ── Outdoor absolute humidity check ──
   humidity_useful: >
-    {% set ti = expand(indoor_temps) | map(attribute='state')
+    {% set ti = expand(indoor_temps or []) | map(attribute='state')
        | select('is_number') | map('float') | list %}
-    {% if outdoor_temp | length == 0 or outdoor_hum | length == 0
-          or ti | length == 0
+    {% if not outdoor_temp or not outdoor_hum or ti | length == 0
           or not is_number(states(outdoor_temp))
           or not is_number(states(outdoor_hum)) %}
       true
@@ -617,7 +609,7 @@ variables:
     {{ is_state(summer_ent, 'on') }}
   # Winter only: in summer open windows are fine
   windows_open_delayed: >
-    {% if summer_mode or window_sensors | length == 0 %}
+    {% if summer_mode or not window_sensors %}
       false
     {% else %}
       {{ expand(window_sensors)
@@ -627,7 +619,7 @@ variables:
          | list | length > 0 }}
     {% endif %}
   fireplace_active: >
-    {% if fireplace_sensors | length == 0 %}
+    {% if not fireplace_sensors %}
       false
     {% else %}
       {{ expand(fireplace_sensors) | selectattr('state', 'eq', 'on')
@@ -658,8 +650,10 @@ variables:
     {% set by_abs = bath_hum >= shower_threshold %}
     {% set by_delta = shower_delta | float(0) > 0 and others | length > 0
        and bath_hum - (others | average) >= shower_delta | float(0) %}
-    {% set by_rate = bath_deriv | length > 0
-       and states(bath_deriv) | float(0) >= shower_rate | float(99) %}
+    {% set rates = expand(bath_deriv or []) | map(attribute='state')
+       | select('is_number') | map('float') | list %}
+    {% set by_rate = rates | length > 0
+       and rates | max >= shower_rate | float(99) %}
     {{ bath_hum >= 0 and (by_abs or by_delta or by_rate) }}
   shower_timer_running: >
     {{ states(shower_timer) in ['active', 'paused'] }}
